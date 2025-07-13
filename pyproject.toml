@@ -1,0 +1,39 @@
+[project]
+name = "aemo-data-updater"
+version = "1.0.0"
+description = "Standalone AEMO data collection service with monitoring UI"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.0.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "pyarrow>=12.0.0",
+    "python-dotenv>=1.0.0",
+    "panel>=1.3.0",
+    "param>=2.0.0",
+    "aiohttp>=3.9.0",
+    "asyncio>=3.4.3",
+    "numpy>=1.24.0",
+    "bokeh>=3.3.0",
+]
+
+[project.scripts]
+aemo-updater = "aemo_updater.__main__:main"
+aemo-updater-ui = "aemo_updater.ui.status_dashboard:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aemo_updater"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+]
