@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
 
-from ..config import PARQUET_FILES, STATUS_UI_PORT, STATUS_UI_HOST, QUALITY_THRESHOLDS
+from ..config import PARQUET_FILES, STATUS_UI_PORT, STATUS_UI_HOST, QUALITY_THRESHOLDS, get_config
 from ..service import UpdaterService
 from ..integrity import DataIntegrityChecker
+from ..alerts import AlertManager, Alert, AlertSeverity, AlertChannel
 
 # Configure Panel
 pn.extension('tabulator', template='material')
@@ -50,6 +51,11 @@ class StatusDashboard(param.Parameterized):
         self.service = UpdaterService()
         self.integrity_checker = DataIntegrityChecker()
         
+        # Initialize alert manager
+        config = get_config()
+        self.alert_manager = AlertManager(vars(config))
+        self.last_alert_check = datetime.now()
+        
         # UI components
         self.status_indicators = {}
         self.log_pane = pn.pane.Str(
@@ -60,6 +66,7 @@ class StatusDashboard(param.Parameterized):
         
         # Start periodic updates
         pn.state.add_periodic_callback(self.update_status, period=5000)  # 5 seconds
+        pn.state.add_periodic_callback(self.check_alerts, period=60000)  # 1 minute
         
     def create_status_card(self, name: str) -> pn.Card:
         """Create status card for a data source"""
@@ -94,6 +101,31 @@ class StatusDashboard(param.Parameterized):
         
         return card
         
+    def check_alerts(self):
+        """Check for alerts and send notifications"""
+        asyncio.create_task(self._check_alerts_async())
+        
+    async def _check_alerts_async(self):
+        """Async alert checking"""
+        try:
+            # Get current statuses
+            statuses = self.service.get_all_status()
+            
+            # Get type-specific thresholds
+            thresholds = QUALITY_THRESHOLDS.get('max_age_minutes_by_type', {})
+            
+            # Check for alerts
+            alerts = await self.alert_manager.check_data_freshness(statuses, thresholds)
+            
+            # Send alerts
+            for alert in alerts:
+                self.add_log(f"ALERT: {alert.title}")
+                await self.alert_manager.send_alert(alert)
+                
+        except Exception as e:
+            logger.error(f"Alert check failed: {e}")
+            self.add_log(f"Alert check error: {e}")
+    
     def update_status(self):
         """Update status indicators and information"""
         statuses = self.service.get_all_status()
@@ -113,7 +145,11 @@ class StatusDashboard(param.Parameterized):
                 # Check data freshness
                 if file_info.get('modified'):
                     age = (datetime.now() - file_info['modified']).total_seconds() / 60
-                    if age > QUALITY_THRESHOLDS['max_age_minutes']:
+                    # Use type-specific threshold if available
+                    max_age = QUALITY_THRESHOLDS.get('max_age_minutes_by_type', {}).get(
+                        name, QUALITY_THRESHOLDS['max_age_minutes']
+                    )
+                    if age > max_age:
                         color = 'orange'
                         status_text = f'Stale ({age:.0f}m old)'
                     else:
@@ -274,6 +310,20 @@ class StatusDashboard(param.Parameterized):
                     width=120
                 ),
             ),
+            pn.Row(
+                pn.widgets.Button(
+                    name='Test Alerts',
+                    button_type='warning',
+                    on_click=self.test_alerts,
+                    width=120
+                ),
+                pn.widgets.Button(
+                    name='Check Alerts',
+                    button_type='info',
+                    on_click=lambda e: self.check_alerts(),
+                    width=120
+                ),
+            ),
             margin=(20, 10)
         )
         
@@ -296,6 +346,48 @@ class StatusDashboard(param.Parameterized):
         """Force immediate update cycle"""
         self.add_log("Running forced update cycle...")
         asyncio.create_task(self.service.run_once())
+        
+    def test_alerts(self, event):
+        """Test alert channels"""
+        self.add_log("Testing alert channels...")
+        asyncio.create_task(self._test_alerts_async())
+        
+    async def _test_alerts_async(self):
+        """Test alerts asynchronously"""
+        try:
+            # Test channel connections
+            results = self.alert_manager.test_channels()
+            
+            for channel, success in results.items():
+                if success:
+                    self.add_log(f"✓ {channel.upper()} alerts: Connected")
+                else:
+                    self.add_log(f"✗ {channel.upper()} alerts: Failed")
+                    
+            # Send test alert if any channel works
+            if any(results.values()):
+                test_alert = Alert(
+                    title="Test Alert",
+                    message="This is a test alert from AEMO Data Updater status dashboard.",
+                    severity=AlertSeverity.INFO,
+                    source="status_dashboard",
+                    metadata={"test": True}
+                )
+                
+                success = await self.alert_manager.send_alert(
+                    test_alert, 
+                    AlertChannel.BOTH
+                )
+                
+                if success:
+                    self.add_log("✓ Test alert sent successfully")
+                else:
+                    self.add_log("✗ Failed to send test alert")
+            else:
+                self.add_log("No alert channels configured")
+                
+        except Exception as e:
+            self.add_log(f"Alert test error: {e}")
         
     def create_layout(self):
         """Create the complete dashboard layout"""

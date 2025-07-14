@@ -1,0 +1,172 @@
+2025-07-14 10:49:06,905 - __main__ - INFO - Starting Status UI...
+2025-07-14 10:51:02,072 - __main__ - INFO - Starting Status UI...
+2025-07-14 10:51:02,584 - aemo_updater.service - INFO - Initializing collectors...
+2025-07-14 10:51:02,584 - aemo_updater.service - ERROR - Failed to initialize generation collector: Can't instantiate abstract class GenerationCollector without an implementation for abstract methods 'get_latest_urls', 'get_unique_columns', 'parse_data', 'validate_data'
+2025-07-14 10:51:02,584 - aemo_updater.service - ERROR - Failed to initialize transmission collector: TransmissionCollector.__init__() missing 1 required positional argument: 'config'
+2025-07-14 10:51:02,584 - aemo_updater.service - ERROR - Failed to initialize price collector: Can't instantiate abstract class PriceCollector without an implementation for abstract methods 'get_latest_urls', 'get_unique_columns', 'parse_data', 'validate_data'
+2025-07-14 10:51:02,584 - aemo_updater.service - ERROR - Failed to initialize rooftop collector: Can't instantiate abstract class RooftopCollector without an implementation for abstract methods 'get_latest_urls', 'get_unique_columns', 'parse_data', 'validate_data'
+2025-07-14 10:51:02,584 - aemo_updater.service - INFO - Service initialized with 0 collectors
+2025-07-14 10:51:02,584 - aemo_updater.ui.simple_dashboard - INFO - ✅ Service initialized successfully
+2025-07-14 11:44:09,803 - src.aemo_updater.service - INFO - Initializing collectors...
+2025-07-14 11:44:09,804 - src.aemo_updater.service - ERROR - Failed to initialize generation collector: Can't instantiate abstract class GenerationCollector without an implementation for abstract methods 'get_latest_urls', 'get_unique_columns', 'parse_data', 'validate_data'
+2025-07-14 11:44:09,804 - src.aemo_updater.service - ERROR - Failed to initialize transmission collector: TransmissionCollector.__init__() missing 1 required positional argument: 'config'
+2025-07-14 11:44:09,804 - src.aemo_updater.service - ERROR - Failed to initialize price collector: Can't instantiate abstract class PriceCollector without an implementation for abstract methods 'get_latest_urls', 'get_unique_columns', 'parse_data', 'validate_data'
+2025-07-14 11:44:09,804 - src.aemo_updater.service - ERROR - Failed to initialize rooftop collector: Can't instantiate abstract class RooftopCollector without an implementation for abstract methods 'get_latest_urls', 'get_unique_columns', 'parse_data', 'validate_data'
+2025-07-14 11:44:09,804 - src.aemo_updater.service - INFO - Service initialized with 0 collectors
+2025-07-14 12:23:36,601 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 12:23:36,650 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCHIS_202507141225_0000000471893698.zip
+2025-07-14 12:23:36,658 - PriceCollector - ERROR - Error downloading http://nemweb.com.au/Reports/CURRENT/DispatchIS_Reports/PUBLIC_DISPATCHIS_202507141225_0000000471893698.zip: 406 Client Error: Not Acceptable for url: http://nemweb.com.au/Reports/CURRENT/DispatchIS_Reports/PUBLIC_DISPATCHIS_202507141225_0000000471893698.zip
+2025-07-14 12:30:26,924 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 12:30:27,128 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCHIS_202507141235_0000000471894734.zip
+2025-07-14 12:30:27,144 - PriceCollector - WARNING - No valid price records extracted
+2025-07-14 12:33:05,862 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 12:33:05,900 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCH_202507141235_20250714123021_LEGACY.zip
+2025-07-14 12:33:05,920 - PriceCollector - INFO - Extracted 5 price records
+2025-07-14 12:33:05,920 - PriceCollector - INFO -   Parsed: NSW1 = $-14.01
+2025-07-14 12:33:05,920 - PriceCollector - INFO -   Parsed: QLD1 = $-18.50
+2025-07-14 12:33:05,920 - PriceCollector - INFO -   Parsed: SA1 = $138.00
+2025-07-14 12:33:45,188 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 12:33:45,226 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCH_202507141235_20250714123021_LEGACY.zip
+2025-07-14 12:33:45,242 - PriceCollector - INFO - Extracted 5 price records
+2025-07-14 12:33:45,242 - PriceCollector - INFO -   Parsed: NSW1 = $-14.01
+2025-07-14 12:33:45,242 - PriceCollector - INFO -   Parsed: QLD1 = $-18.50
+2025-07-14 12:33:45,243 - PriceCollector - INFO -   Parsed: SA1 = $138.00
+2025-07-14 12:33:45,244 - PriceCollector - INFO - Checking for new spot price data...
+2025-07-14 12:33:45,283 - PriceCollector - INFO - Loaded historical data: 40800 records, latest: 2025-07-14 12:35:00
+2025-07-14 12:33:45,300 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCH_202507141235_20250714123021_LEGACY.zip
+2025-07-14 12:33:45,315 - PriceCollector - INFO - Extracted 5 price records
+2025-07-14 12:33:45,315 - PriceCollector - INFO -   Parsed: NSW1 = $-14.01
+2025-07-14 12:33:45,315 - PriceCollector - INFO -   Parsed: QLD1 = $-18.50
+2025-07-14 12:33:45,315 - PriceCollector - INFO -   Parsed: SA1 = $138.00
+2025-07-14 12:33:45,315 - PriceCollector - INFO - No new prices - data not newer than existing
+2025-07-14 12:58:07,871 - GenerationCollector - INFO - Loading gen_info from: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_info.pkl
+2025-07-14 12:58:07,872 - GenerationCollector - INFO - Loaded 528 DUID mappings
+2025-07-14 12:58:07,872 - GenerationCollector - INFO - Generation collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet
+2025-07-14 12:58:07,933 - GenerationCollector - INFO - Found latest SCADA file: /Reports/CURRENT/Dispatch_SCADA/PUBLIC_DISPATCHSCADA_202507141300_0000000471897256.zip
+2025-07-14 12:58:07,947 - GenerationCollector - INFO - Extracted 471 SCADA records
+2025-07-14 12:58:07,947 - GenerationCollector - INFO -   Settlement time: 2025-07-14 13:00:00
+2025-07-14 12:58:07,947 - GenerationCollector - INFO -   Unique DUIDs: 471
+2025-07-14 12:58:07,947 - GenerationCollector - WARNING - Found 48 unknown DUIDs
+2025-07-14 12:58:07,947 - GenerationCollector - WARNING -   Unknown DUID: RT_NSW4
+2025-07-14 12:58:07,947 - GenerationCollector - WARNING -   Unknown DUID: RT_VIC8
+2025-07-14 12:58:07,947 - GenerationCollector - WARNING -   Unknown DUID: SNOWYP
+2025-07-14 12:58:07,947 - GenerationCollector - WARNING -   Unknown DUID: RT_VIC9
+2025-07-14 12:58:07,947 - GenerationCollector - WARNING -   Unknown DUID: WAMBOWF1
+2025-07-14 12:58:07,948 - GenerationCollector - WARNING - Very negative generation: -276.16 MW
+2025-07-14 12:58:07,948 - GenerationCollector - INFO - Checking for new generation data...
+2025-07-14 12:58:08,093 - GenerationCollector - INFO - Loaded historical data: 3352095 records, latest: 2025-07-14 12:55:00
+2025-07-14 12:58:08,124 - GenerationCollector - INFO - Found latest SCADA file: /Reports/CURRENT/Dispatch_SCADA/PUBLIC_DISPATCHSCADA_202507141300_0000000471897256.zip
+2025-07-14 12:58:08,137 - GenerationCollector - INFO - Extracted 471 SCADA records
+2025-07-14 12:58:08,138 - GenerationCollector - INFO -   Settlement time: 2025-07-14 13:00:00
+2025-07-14 12:58:08,138 - GenerationCollector - INFO -   Unique DUIDs: 471
+2025-07-14 12:58:08,138 - GenerationCollector - WARNING - Found 48 unknown DUIDs
+2025-07-14 12:58:08,138 - GenerationCollector - WARNING -   Unknown DUID: RT_NSW4
+2025-07-14 12:58:08,138 - GenerationCollector - WARNING -   Unknown DUID: RT_VIC8
+2025-07-14 12:58:08,138 - GenerationCollector - WARNING -   Unknown DUID: SNOWYP
+2025-07-14 12:58:08,138 - GenerationCollector - WARNING -   Unknown DUID: RT_VIC9
+2025-07-14 12:58:08,138 - GenerationCollector - WARNING -   Unknown DUID: WAMBOWF1
+2025-07-14 12:58:08,138 - GenerationCollector - WARNING - Very negative generation: -276.16 MW
+2025-07-14 12:58:08,138 - GenerationCollector - INFO - New generation data found for 2025-07-14 13:00:00:
+2025-07-14 12:58:08,138 - GenerationCollector - INFO -   Records: 471
+2025-07-14 12:58:08,138 - GenerationCollector - INFO -   DUIDs: 471
+2025-07-14 12:58:08,138 - GenerationCollector - INFO -   Total MW: 20525.1
+2025-07-14 12:58:08,530 - GenerationCollector - INFO - Saved 3352566 records to /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet (14.78 MB)
+2025-07-14 12:58:08,530 - GenerationCollector - INFO - Added 471 new records. Total: 3352566
+2025-07-14 12:58:08,774 - GenerationCollector - INFO - Loaded historical data: 3352566 records, latest: 2025-07-14 13:00:00
+2025-07-14 13:21:16,433 - __main__ - INFO - Starting Status UI...
+2025-07-14 13:21:17,949 - aemo_updater.service - INFO - Initializing collectors...
+2025-07-14 13:21:17,949 - GenerationCollector - INFO - Loading gen_info from: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_info.pkl
+2025-07-14 13:21:17,950 - GenerationCollector - INFO - Loaded 528 DUID mappings
+2025-07-14 13:21:17,950 - GenerationCollector - INFO - Generation collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet
+2025-07-14 13:21:17,950 - aemo_updater.service - INFO - Generation collector initialized
+2025-07-14 13:21:17,950 - aemo_updater.service - ERROR - Failed to initialize transmission collector: TransmissionCollector.__init__() missing 1 required positional argument: 'config'
+2025-07-14 13:21:17,950 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 13:21:17,950 - aemo_updater.service - INFO - Price collector initialized
+2025-07-14 13:21:17,950 - aemo_updater.service - ERROR - Failed to initialize rooftop collector: Can't instantiate abstract class RooftopCollector without an implementation for abstract methods 'get_latest_urls', 'get_unique_columns', 'parse_data', 'validate_data'
+2025-07-14 13:21:17,951 - aemo_updater.service - INFO - Service initialized with 2 collectors
+2025-07-14 13:21:17,951 - aemo_updater.ui.simple_dashboard - INFO - ✅ Service initialized successfully
+2025-07-14 13:36:33,178 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 13:36:33,179 - GenerationCollector - INFO - Loading gen_info from: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_info.pkl
+2025-07-14 13:36:33,180 - GenerationCollector - INFO - Loaded 528 DUID mappings
+2025-07-14 13:36:33,180 - GenerationCollector - INFO - Generation collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet
+2025-07-14 13:37:57,086 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 13:37:57,087 - GenerationCollector - INFO - Loading gen_info from: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_info.pkl
+2025-07-14 13:37:57,087 - GenerationCollector - INFO - Loaded 528 DUID mappings
+2025-07-14 13:37:57,087 - GenerationCollector - INFO - Generation collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet
+2025-07-14 13:37:57,179 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCH_202507141340_20250714133516_LEGACY.zip
+2025-07-14 13:37:57,184 - PriceCollector - INFO - Loaded historical data: 40865 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,186 - PriceCollector - INFO - Loaded historical data: 40865 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,191 - PriceCollector - INFO - Saved 40865 records to /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 13:37:57,193 - PriceCollector - INFO - Loaded historical data: 40865 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,194 - PriceCollector - INFO - Loaded historical data: 40865 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,194 - PriceCollector - INFO - Checking for new spot price data...
+2025-07-14 13:37:57,195 - PriceCollector - INFO - Loaded historical data: 40865 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,212 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCH_202507141340_20250714133516_LEGACY.zip
+2025-07-14 13:37:57,226 - PriceCollector - INFO - Extracted 5 price records
+2025-07-14 13:37:57,226 - PriceCollector - INFO -   Parsed: NSW1 = $-25.35
+2025-07-14 13:37:57,226 - PriceCollector - INFO -   Parsed: QLD1 = $-21.50
+2025-07-14 13:37:57,226 - PriceCollector - INFO -   Parsed: SA1 = $33.24
+2025-07-14 13:37:57,226 - PriceCollector - INFO - No new prices - data not newer than existing
+2025-07-14 13:37:57,282 - GenerationCollector - INFO - Found latest SCADA file: /Reports/CURRENT/Dispatch_SCADA/PUBLIC_DISPATCHSCADA_202507141340_0000000471901847.zip
+2025-07-14 13:37:57,369 - GenerationCollector - INFO - Loaded historical data: 3356334 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,454 - GenerationCollector - INFO - Loaded historical data: 3356334 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,724 - GenerationCollector - INFO - Saved 3356334 records to /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet (14.76 MB)
+2025-07-14 13:37:57,805 - GenerationCollector - INFO - Loaded historical data: 3356334 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,928 - GenerationCollector - INFO - Loaded historical data: 3356334 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:57,931 - GenerationCollector - INFO - Checking for new generation data...
+2025-07-14 13:37:58,010 - GenerationCollector - INFO - Loaded historical data: 3356334 records, latest: 2025-07-14 13:40:00
+2025-07-14 13:37:58,045 - GenerationCollector - INFO - Found latest SCADA file: /Reports/CURRENT/Dispatch_SCADA/PUBLIC_DISPATCHSCADA_202507141340_0000000471901847.zip
+2025-07-14 13:37:58,062 - GenerationCollector - INFO - Extracted 471 SCADA records
+2025-07-14 13:37:58,062 - GenerationCollector - INFO -   Settlement time: 2025-07-14 13:40:00
+2025-07-14 13:37:58,062 - GenerationCollector - INFO -   Unique DUIDs: 471
+2025-07-14 13:37:58,062 - GenerationCollector - WARNING - Found 48 unknown DUIDs
+2025-07-14 13:37:58,062 - GenerationCollector - WARNING -   Unknown DUID: RT_VIC2
+2025-07-14 13:37:58,062 - GenerationCollector - WARNING -   Unknown DUID: RT_QLD1
+2025-07-14 13:37:58,062 - GenerationCollector - WARNING -   Unknown DUID: RT_SA2
+2025-07-14 13:37:58,062 - GenerationCollector - WARNING -   Unknown DUID: PIONEER
+2025-07-14 13:37:58,062 - GenerationCollector - WARNING -   Unknown DUID: RT_VIC10
+2025-07-14 13:37:58,063 - GenerationCollector - INFO - No new generation data - data not newer than existing
+2025-07-14 13:46:22,167 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 13:46:22,234 - PriceCollector - INFO - Loaded historical data: 40870 records, latest: 2025-07-14 13:45:00
+2025-07-14 13:46:22,235 - GenerationCollector - INFO - Loading gen_info from: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_info.pkl
+2025-07-14 13:46:22,236 - GenerationCollector - INFO - Loaded 528 DUID mappings
+2025-07-14 13:46:22,236 - GenerationCollector - INFO - Generation collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet
+2025-07-14 13:48:48,699 - PriceCollector - INFO - Price collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 13:48:48,781 - PriceCollector - INFO - Loaded historical data: 40870 records, latest: 2025-07-14 13:45:00
+2025-07-14 13:48:48,783 - PriceCollector - INFO - Checking for new spot price data...
+2025-07-14 13:48:48,785 - PriceCollector - INFO - Loaded historical data: 40870 records, latest: 2025-07-14 13:45:00
+2025-07-14 13:48:48,833 - PriceCollector - INFO - Found latest price file: PUBLIC_DISPATCH_202507141350_20250714134527_LEGACY.zip
+2025-07-14 13:48:48,852 - PriceCollector - INFO - Extracted 5 price records
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   Parsed: NSW1 = $-18.00
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   Parsed: QLD1 = $-16.36
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   Parsed: SA1 = $8.68
+2025-07-14 13:48:48,852 - PriceCollector - INFO - New prices found for 2025-07-14 13:50:00:
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   NSW1: $-18.00
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   QLD1: $-16.36
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   SA1: $8.68
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   TAS1: $150.12
+2025-07-14 13:48:48,852 - PriceCollector - INFO -   VIC1: $8.95
+2025-07-14 13:48:48,866 - PriceCollector - INFO - Saved 40875 records to /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-spot-dashboard/spot_hist.parquet
+2025-07-14 13:48:48,866 - PriceCollector - INFO - Added 5 new records. Total: 40875
+2025-07-14 13:48:48,866 - GenerationCollector - INFO - Loading gen_info from: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_info.pkl
+2025-07-14 13:48:48,867 - GenerationCollector - INFO - Loaded 528 DUID mappings
+2025-07-14 13:48:48,867 - GenerationCollector - INFO - Generation collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet
+2025-07-14 13:48:48,985 - GenerationCollector - INFO - Loaded historical data: 3356334 records, latest: 2025-07-14 13:45:00
+2025-07-14 13:48:48,995 - GenerationCollector - INFO - Checking for new generation data...
+2025-07-14 13:48:49,080 - GenerationCollector - INFO - Loaded historical data: 3356334 records, latest: 2025-07-14 13:45:00
+2025-07-14 13:48:49,138 - GenerationCollector - INFO - Found latest SCADA file: /Reports/CURRENT/Dispatch_SCADA/PUBLIC_DISPATCHSCADA_202507141350_0000000471902983.zip
+2025-07-14 13:48:49,156 - GenerationCollector - INFO - Extracted 471 SCADA records
+2025-07-14 13:48:49,156 - GenerationCollector - INFO -   Settlement time: 2025-07-14 13:50:00
+2025-07-14 13:48:49,156 - GenerationCollector - INFO -   Unique DUIDs: 471
+2025-07-14 13:48:49,157 - GenerationCollector - WARNING - Found 48 unknown DUIDs
+2025-07-14 13:48:49,157 - GenerationCollector - WARNING -   Unknown DUID: CUSF1
+2025-07-14 13:48:49,157 - GenerationCollector - WARNING -   Unknown DUID: SNOWSTH1
+2025-07-14 13:48:49,157 - GenerationCollector - WARNING -   Unknown DUID: WNSF1
+2025-07-14 13:48:49,157 - GenerationCollector - WARNING -   Unknown DUID: MANNUMB1
+2025-07-14 13:48:49,157 - GenerationCollector - WARNING -   Unknown DUID: RT_SA6
+2025-07-14 13:48:49,157 - GenerationCollector - INFO - New generation data found for 2025-07-14 13:50:00:
+2025-07-14 13:48:49,157 - GenerationCollector - INFO -   Records: 471
+2025-07-14 13:48:49,157 - GenerationCollector - INFO -   DUIDs: 471
+2025-07-14 13:48:49,157 - GenerationCollector - INFO -   Total MW: 21399.6
+2025-07-14 13:48:49,556 - GenerationCollector - INFO - Saved 3356805 records to /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet (14.71 MB)
+2025-07-14 13:48:49,557 - GenerationCollector - INFO - Added 471 new records. Total: 3356805

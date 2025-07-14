@@ -106,9 +106,22 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL', '')
 SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
 
+# SMS alerts via Twilio (optional) - Uses same env vars as existing price alerts
+ENABLE_SMS_ALERTS = os.getenv('ENABLE_SMS_ALERTS', 'false').lower() == 'true'
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '')  # Your Twilio phone number
+MY_PHONE_NUMBER = os.getenv('MY_PHONE_NUMBER', '')          # Recipient phone number
+
 # Data quality thresholds
 QUALITY_THRESHOLDS = {
-    'max_age_minutes': 15,  # Data older than this is considered stale
+    'max_age_minutes': 30,  # Default: Data older than this is considered stale
+    'max_age_minutes_by_type': {
+        'generation': 30,     # 5-minute data, alert after 30 min
+        'price': 30,          # 5-minute data, alert after 30 min
+        'transmission': 30,   # 5-minute data, alert after 30 min
+        'rooftop': 90,        # 30-minute data, alert after 90 min
+    },
     'min_records_per_update': {
         'generation': 100,  # Expect ~500+ DUIDs
         'price': 5,         # 5 regions
@@ -177,5 +190,12 @@ def get_config():
     config.recipient_email = RECIPIENT_EMAIL
     config.smtp_server = SMTP_SERVER
     config.smtp_port = SMTP_PORT
+    
+    # SMS settings
+    config.sms_enabled = ENABLE_SMS_ALERTS
+    config.twilio_account_sid = TWILIO_ACCOUNT_SID
+    config.twilio_auth_token = TWILIO_AUTH_TOKEN
+    config.twilio_phone_number = TWILIO_PHONE_NUMBER
+    config.my_phone_number = MY_PHONE_NUMBER
     
     return config

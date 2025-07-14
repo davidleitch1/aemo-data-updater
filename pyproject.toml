@@ -18,6 +18,10 @@ dependencies = [
     "bokeh>=3.3.0",
 ]
 
+[project.optional-dependencies]
+sms = ["twilio>=8.0.0"]
+all = ["twilio>=8.0.0"]
+
 [project.scripts]
 aemo-updater = "aemo_updater.__main__:main"
 aemo-updater-ui = "aemo_updater.ui.status_dashboard:main"
