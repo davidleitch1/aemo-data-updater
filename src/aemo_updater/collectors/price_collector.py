@@ -18,6 +18,13 @@ import requests
 
 from ..config import get_config, get_logger, HTTP_HEADERS
 
+# Import Twilio price alerts
+try:
+    from .twilio_price_alerts import check_price_alerts
+    TWILIO_ALERTS_AVAILABLE = True
+except ImportError as e:
+    TWILIO_ALERTS_AVAILABLE = False
+
 
 class PriceCollector:
     """
@@ -254,6 +261,15 @@ class PriceCollector:
         if newer_records.empty:
             self.logger.info("No new records found")
             return False
+        
+        # CHECK FOR PRICE ALERTS before logging (exactly as in update_spot.py)
+        if TWILIO_ALERTS_AVAILABLE:
+            try:
+                check_price_alerts(newer_records)
+            except Exception as e:
+                self.logger.error(f"Error checking price alerts: {e}")
+        else:
+            self.logger.debug("Twilio price alerts not available")
         
         # Log new prices
         self.logger.info(f"New prices found for {newer_records.index[0]}:")
