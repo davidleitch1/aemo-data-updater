@@ -5,10 +5,13 @@ Central configuration for all data collection and storage settings
 
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (with fallback if dotenv not available)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("Warning: python-dotenv not available, using system environment variables only")
 
 # Base paths
 BASE_PATH = Path(os.getenv('AEMO_DATA_PATH', '/Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot'))
@@ -73,7 +76,7 @@ NEMWEB_URLS = {
 }
 
 # Update settings
-UPDATE_INTERVAL_SECONDS = int(os.getenv('UPDATE_INTERVAL_MINUTES', '4.5')) * 60
+UPDATE_INTERVAL_SECONDS = int(float(os.getenv('UPDATE_INTERVAL_MINUTES', '4.5')) * 60)
 MAX_RETRIES = 3
 RETRY_DELAY = 10  # seconds
 REQUEST_TIMEOUT = 60  # seconds
@@ -115,3 +118,62 @@ QUALITY_THRESHOLDS = {
 # Backfill settings
 MAX_BACKFILL_DAYS = 30  # Maximum days to backfill at once
 BACKFILL_CHUNK_SIZE = 7  # Process in weekly chunks
+
+
+import logging
+from types import SimpleNamespace
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a configured logger instance"""
+    logger = logging.getLogger(name)
+    
+    if not logger.handlers:
+        # Set up logging format
+        formatter = logging.Formatter(LOG_FORMAT)
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        # File handler
+        if not LOG_FILE.parent.exists():
+            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_handler = logging.FileHandler(LOG_FILE)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        # Set level
+        logger.setLevel(getattr(logging, LOG_LEVEL.upper()))
+    
+    return logger
+
+
+def get_config():
+    """Get configuration as a namespace object for compatibility"""
+    config = SimpleNamespace()
+    
+    # Data file paths
+    config.gen_output_file = Path(os.getenv('GEN_OUTPUT_FILE', str(PARQUET_FILES['generation']['path'])))
+    config.spot_hist_file = PARQUET_FILES['price']['path'] 
+    config.transmission_output_file = PARQUET_FILES['transmission']['path']
+    config.rooftop_solar_file = PARQUET_FILES['rooftop']['path']
+    
+    # Update settings
+    config.update_interval_minutes = float(os.getenv('UPDATE_INTERVAL_MINUTES', '4.5'))
+    
+    # Paths
+    config.data_dir = DATA_PATH
+    config.logs_dir = LOG_PATH
+    
+    # Email settings
+    config.email_enabled = ENABLE_EMAIL_ALERTS
+    config.alert_email = ALERT_EMAIL
+    config.alert_password = ALERT_PASSWORD
+    config.recipient_email = RECIPIENT_EMAIL
+    config.smtp_server = SMTP_SERVER
+    config.smtp_port = SMTP_PORT
+    
+    return config
