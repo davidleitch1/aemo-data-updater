@@ -293,6 +293,19 @@ class PriceCollector:
         """Alias for update_data to match expected interface"""
         return self.update_data()
     
+    def get_summary(self) -> Dict[str, Any]:
+        """Get collector summary for status reporting"""
+        try:
+            df = self.load_historical_data()
+            latest = df.index.max() if len(df) > 0 else None
+            return {
+                'records': len(df),
+                'latest': latest.strftime('%Y-%m-%d %H:%M') if latest else 'No data',
+                'regions': df['REGIONID'].nunique() if len(df) > 0 else 0
+            }
+        except Exception as e:
+            return {'error': str(e)}
+    
     def check_integrity(self) -> Dict[str, Any]:
         """Check data integrity"""
         df = self.load_historical_data()
@@ -327,3 +340,353 @@ class PriceCollector:
             "records": len(df),
             "date_range": f"{df.index.min()} to {df.index.max()}"
         }
+    
+    def backfill_missing_data(self, missing_times: List[datetime]) -> bool:
+        """Download and integrate missing price data for specific timestamps"""
+        if not missing_times:
+            return True
+            
+        self.logger.info(f"Starting backfill for {len(missing_times)} missing price intervals")
+        
+        try:
+            # Load existing data
+            historical_df = self.load_historical_data()
+            new_records = []
+            
+            # Group missing times by date to minimize downloads
+            dates_needed = {}
+            for dt in missing_times:
+                date_key = dt.strftime('%Y%m%d')
+                if date_key not in dates_needed:
+                    dates_needed[date_key] = []
+                dates_needed[date_key].append(dt)
+            
+            # Download data for each date
+            for date_str, times_for_date in dates_needed.items():
+                self.logger.info(f"Downloading data for {date_str}: {len(times_for_date)} intervals")
+                
+                # Try to find and download data for this date
+                date_records = self._download_date_data(date_str, times_for_date)
+                if date_records:
+                    new_records.extend(date_records)
+                    self.logger.info(f"Found {len(date_records)} records for {date_str}")
+                else:
+                    self.logger.warning(f"No data found for {date_str}")
+            
+            if new_records:
+                # Convert to DataFrame and integrate
+                new_df = pd.DataFrame(new_records)
+                new_df['SETTLEMENTDATE'] = pd.to_datetime(new_df['SETTLEMENTDATE'])
+                new_df = new_df.set_index('SETTLEMENTDATE').sort_index()
+                
+                # Combine with existing data
+                combined_df = pd.concat([historical_df, new_df])
+                combined_df = combined_df.reset_index()
+                combined_df = combined_df.drop_duplicates(subset=['SETTLEMENTDATE', 'REGIONID'], keep='last')
+                combined_df = combined_df.set_index('SETTLEMENTDATE').sort_index()
+                
+                # Save updated data
+                self.save_data(combined_df)
+                
+                self.logger.info(f"Backfill complete: added {len(new_records)} records")
+                return True
+            else:
+                self.logger.warning("No new data found during backfill")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Backfill failed: {e}")
+            return False
+    
+    def _download_date_data(self, date_str: str, target_times: List[datetime]) -> List[Dict]:
+        """Download price data for a specific date"""
+        try:
+            # Try current directory first
+            self.logger.info(f"Trying CURRENT directory for {date_str}")
+            records = self._try_current_directory(date_str, target_times)
+            if records:
+                return records
+            
+            # Try archive directory if current didn't work
+            self.logger.info(f"Trying ARCHIVE directory for {date_str}")
+            records = self._try_archive_directory(date_str, target_times)
+            if records:
+                return records
+                
+            self.logger.warning(f"No data found in CURRENT or ARCHIVE for {date_str}")
+            return []
+            
+        except Exception as e:
+            self.logger.error(f"Error downloading data for {date_str}: {e}")
+            return []
+    
+    def _try_current_directory(self, date_str: str, target_times: List[datetime]) -> List[Dict]:
+        """Try to find data in CURRENT directory - process ALL matching files"""
+        try:
+            # Use the SAME URL as real-time collection (case matters!)
+            base_url = "http://nemweb.com.au/Reports/Current/Dispatch_Reports/"
+            response = requests.get(base_url, headers=HTTP_HEADERS, timeout=30)
+            if response.status_code != 200:
+                return []
+                
+            # Find ALL dispatch files for this date
+            # Files can be either PUBLIC_DISPATCH_YYYYMMDD* or PUBLIC_DISPATCHIS_YYYYMMDD*
+            patterns = [
+                f'PUBLIC_DISPATCH_{date_str}[^"]*\\.zip',
+                f'PUBLIC_DISPATCHIS_{date_str}[^"]*\\.zip'
+            ]
+            
+            all_files = []
+            for pattern in patterns:
+                files = re.findall(pattern, response.text)
+                all_files.extend(files)
+            
+            # Remove duplicates
+            all_files = list(set(all_files))
+            self.logger.info(f"Found {len(all_files)} dispatch files in CURRENT for {date_str}")
+            
+            if not all_files:
+                return []
+            
+            # Convert target times to set for efficient lookup
+            target_times_set = {dt.replace(second=0, microsecond=0) for dt in target_times}
+            all_records = []
+            files_processed = 0
+            
+            # Process ALL files to find matching timestamps
+            # Note: We need to check all files as timestamp in filename doesn't match data inside
+            for i, filename in enumerate(all_files):
+                # Note: Filename timestamp doesn't match data timestamp inside
+                # e.g., PUBLIC_DISPATCH_202507141430_20250714142516_LEGACY.zip
+                # was created at 14:25:16 but contains data for 14:30:00
+                self.logger.debug(f"Checking file: {filename}")
+                
+                # Download and process this file
+                file_url = f"{base_url}{filename}"
+                try:
+                    records = self._extract_price_data_from_url(file_url)
+                    self.logger.debug(f"Extracted {len(records)} records from {filename}")
+                    if records:
+                        # Filter to only the timestamps we need
+                        filtered_records = self._filter_records_by_time(records, target_times)
+                        if filtered_records:
+                            all_records.extend(filtered_records)
+                            self.logger.info(f"Found {len(filtered_records)} records in {filename}")
+                            files_processed += 1
+                            
+                            # Check if we've found all needed timestamps
+                            found_times = {pd.to_datetime(r['SETTLEMENTDATE']).replace(second=0, microsecond=0) 
+                                         for r in all_records}
+                            missing_count = len(target_times_set - found_times)
+                            if missing_count == 0:
+                                self.logger.info(f"Found all {len(target_times_set)} target timestamps after processing {files_processed} files")
+                                return all_records
+                            elif files_processed % 10 == 0:
+                                self.logger.info(f"Progress: processed {files_processed} files, found {len(all_records)} records, still missing {missing_count} timestamps")
+                                
+                except Exception as e:
+                    self.logger.debug(f"Failed to process {filename}: {e}")
+                    continue
+            
+            if all_records:
+                self.logger.info(f"Found {len(all_records)} total records from {files_processed} CURRENT files")
+                return all_records
+            else:
+                self.logger.warning(f"No matching records found after checking {len(all_files)} files")
+                return []
+            
+        except Exception as e:
+            self.logger.debug(f"Error checking CURRENT directory: {e}")
+            return []
+    
+    def _try_archive_directory(self, date_str: str, target_times: List[datetime]) -> List[Dict]:
+        """Try to find data in ARCHIVE directory - use Dispatch_Reports not DispatchIS"""
+        try:
+            # Price data is in Dispatch_Reports archive, not DispatchIS_Reports!
+            archive_url = "https://www.nemweb.com.au/REPORTS/ARCHIVE/Dispatch_Reports/"
+            daily_filename = f"PUBLIC_DISPATCH_{date_str}.zip"
+            daily_file_url = f"{archive_url}{daily_filename}"
+            
+            self.logger.info(f"Trying working archive pattern: {daily_file_url}")
+            
+            try:
+                response = requests.get(daily_file_url, headers=HTTP_HEADERS, timeout=30)
+                self.logger.info(f"Archive response: HTTP {response.status_code}")
+                
+                if response.status_code == 200:
+                    self.logger.info(f"Found daily archive: {daily_filename} ({len(response.content)} bytes)")
+                    records = self._extract_from_daily_archive(response.content, target_times)
+                    if records:
+                        return records
+                    else:
+                        self.logger.warning("Daily archive found but no matching records extracted")
+                else:
+                    self.logger.warning(f"Daily archive not found: HTTP {response.status_code}")
+                        
+            except Exception as e:
+                self.logger.error(f"Error accessing {daily_file_url}: {e}")
+                    
+            return []
+            
+        except Exception as e:
+            self.logger.error(f"Error checking ARCHIVE directory: {e}")
+            return []
+    
+    def _extract_from_daily_archive(self, daily_zip_content: bytes, target_times: List[datetime]) -> List[Dict]:
+        """Extract data from daily archive with nested ZIP structure"""
+        try:
+            all_records = []
+            target_times_set = {dt.replace(second=0, microsecond=0) for dt in target_times}
+            
+            with zipfile.ZipFile(BytesIO(daily_zip_content)) as daily_zip:
+                # List all nested ZIP files (should be 288 for a full day)
+                nested_zips = [f for f in daily_zip.namelist() if f.endswith('.zip')]
+                self.logger.info(f"Daily archive contains {len(nested_zips)} nested 5-minute ZIP files")
+                
+                for nested_zip_name in nested_zips:
+                    try:
+                        # Extract timestamp from nested ZIP filename
+                        # Format: PUBLIC_DISPATCH_YYYYMMDDHHMM_*.zip (not DISPATCHIS)
+                        timestamp_match = re.search(r'(\d{12})', nested_zip_name)
+                        if not timestamp_match:
+                            continue
+                            
+                        timestamp_str = timestamp_match.group(1)
+                        file_datetime = datetime.strptime(timestamp_str, '%Y%m%d%H%M')
+                        file_datetime = file_datetime.replace(second=0, microsecond=0)
+                        
+                        # Only process if this timestamp is in our target list
+                        if file_datetime not in target_times_set:
+                            continue
+                            
+                        self.logger.debug(f"Processing nested ZIP for {file_datetime}: {nested_zip_name}")
+                        
+                        # Extract and process the nested ZIP
+                        with daily_zip.open(nested_zip_name) as nested_file:
+                            with zipfile.ZipFile(nested_file) as minute_zip:
+                                csv_files = [f for f in minute_zip.namelist() if f.endswith('.CSV')]
+                                if csv_files:
+                                    with minute_zip.open(csv_files[0]) as csv_file:
+                                        content = csv_file.read().decode('utf-8')
+                                        records = self._parse_dispatch_csv(content)
+                                        
+                                        # Filter records to this specific timestamp
+                                        filtered_records = []
+                                        for record in records:
+                                            record_time = pd.to_datetime(record['SETTLEMENTDATE']).replace(second=0, microsecond=0)
+                                            if record_time == file_datetime:
+                                                filtered_records.append(record)
+                                        
+                                        if filtered_records:
+                                            all_records.extend(filtered_records)
+                                            self.logger.debug(f"Found {len(filtered_records)} price records for {file_datetime}")
+                        
+                    except Exception as e:
+                        self.logger.debug(f"Error processing nested ZIP {nested_zip_name}: {e}")
+                        continue
+            
+            if all_records:
+                self.logger.info(f"Extracted {len(all_records)} total records from daily archive")
+                return all_records
+            else:
+                self.logger.warning("No matching records found in daily archive")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"Error extracting from daily archive: {e}")
+            return []
+    
+    def _parse_dispatch_csv(self, content: str) -> List[Dict]:
+        """Parse DISPATCH CSV content to extract DREGION price data"""
+        try:
+            records = []
+            lines = content.split('\n')
+            
+            for line in lines:
+                if not line.strip():
+                    continue
+                    
+                # Parse CSV line properly
+                try:
+                    reader = csv.reader([line])
+                    fields = next(reader)
+                except:
+                    continue
+                
+                # Price data is in DREGION table (same as real-time update)
+                # D,DREGION,,3,"2025/07/14 16:35:00",1,NSW1,0,176.80386,0,176.80386,0,0,...
+                # Index: 0=D, 1=DREGION, 2=empty, 3=3, 4=SETTLEMENTDATE, 5=RUNNO, 6=REGIONID, 7=INTERVENTION, 8=RRP
+                if len(fields) >= 9 and fields[0] == 'D' and fields[1] == 'DREGION':
+                    try:
+                        record = {
+                            'REGIONID': fields[6],
+                            'SETTLEMENTDATE': fields[4].strip('"'),  # Remove quotes
+                            'RRP': float(fields[8])
+                        }
+                        records.append(record)
+                        self.logger.debug(f"Parsed DREGION price record: {record}")
+                    except (ValueError, IndexError) as e:
+                        self.logger.debug(f"Error parsing DREGION row: {e}")
+                        continue
+            
+            if not records:
+                self.logger.debug("No DREGION price rows found")
+            else:
+                self.logger.debug(f"Found {len(records)} DREGION price records")
+            
+            return records
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing CSV: {e}")
+            return []
+    
+    def _filter_records_by_time(self, records: List[Dict], target_times: List[datetime]) -> List[Dict]:
+        """Filter records to only include target timestamps"""
+        try:
+            filtered_records = []
+            target_times_set = {dt.replace(second=0, microsecond=0) for dt in target_times}
+            
+            for record in records:
+                record_time = pd.to_datetime(record['SETTLEMENTDATE']).replace(second=0, microsecond=0)
+                if record_time in target_times_set:
+                    filtered_records.append(record)
+            
+            return filtered_records
+            
+        except Exception as e:
+            self.logger.debug(f"Error filtering records: {e}")
+            return []
+    
+    def _extract_price_data_from_url(self, url: str) -> List[Dict]:
+        """Extract price data from a specific ZIP URL"""
+        try:
+            response = requests.get(url, headers=HTTP_HEADERS, timeout=30)
+            if response.status_code != 200:
+                self.logger.debug(f"HTTP {response.status_code} for {url}")
+                return []
+                
+            # Process ZIP file
+            with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
+                self.logger.debug(f"ZIP contains: {[f.filename for f in zip_file.filelist]}")
+                
+                for file_info in zip_file.filelist:
+                    if file_info.filename.endswith('.CSV'):
+                        self.logger.debug(f"Processing CSV: {file_info.filename}")
+                        
+                        with zip_file.open(file_info.filename) as csvfile:
+                            content = csvfile.read().decode('utf-8')
+                            
+                            # Parse using the same logic for both archive and current files
+                            records = self._parse_dispatch_csv(content)
+                            
+                            if records:
+                                self.logger.info(f"Extracted {len(records)} records from {file_info.filename}")
+                                return records
+                            else:
+                                self.logger.debug(f"No valid records found in {file_info.filename}")
+                                
+            return []
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting data from {url}: {e}")
+            return []

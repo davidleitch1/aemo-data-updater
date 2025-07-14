@@ -82,12 +82,12 @@ class AEMOStatusDashboard:
             if date_cols:
                 latest_dt = pd.to_datetime(df[date_cols[0]]).max()
                 age_hours = (datetime.now() - latest_dt).total_seconds() / 3600
-                latest_str = latest_dt.strftime('%Y-%m-%d %H:%M')
+                latest_str = latest_dt.strftime('%d-%b %H:%M')
             elif hasattr(df.index, 'name') and df.index.name and ('date' in str(df.index.name).lower() or 'time' in str(df.index.name).lower()):
                 # Date is in the index
                 latest_dt = pd.to_datetime(df.index).max()
                 age_hours = (datetime.now() - latest_dt).total_seconds() / 3600
-                latest_str = latest_dt.strftime('%Y-%m-%d %H:%M')
+                latest_str = latest_dt.strftime('%d-%b %H:%M')
             else:
                 latest_str = 'No date column'
                 age_hours = 999
@@ -189,18 +189,19 @@ class AEMOStatusDashboard:
         
         health_pct = (healthy_files / total_files) * 100 if total_files > 0 else 0
         
-        # Overall health indicator
+        # Overall health indicator with current time
+        current_time = datetime.now().strftime('%H:%M')
         if health_pct >= 100:
-            overall_status = "🟢 All Systems Operational"
+            overall_status = f"🟢 All Systems Operational at {current_time}"
             color = "#4CAF50"
         elif health_pct >= 75:
-            overall_status = "🟡 Mostly Operational" 
+            overall_status = f"🟡 Mostly Operational at {current_time}" 
             color = "#FFC107"
         elif health_pct >= 50:
-            overall_status = "🟠 Some Issues"
+            overall_status = f"🟠 Some Issues at {current_time}"
             color = "#FF9800"
         else:
-            overall_status = "🔴 Multiple Issues"
+            overall_status = f"🔴 Multiple Issues at {current_time}"
             color = "#F44336"
         
         # Create individual stat panels
@@ -238,30 +239,249 @@ class AEMOStatusDashboard:
         
         return summary
     
-    def run_integrity_check(self):
-        """Manual integrity check"""
-        self.add_log("🔍 Running data integrity check...")
+    def find_missing_intervals(self, df, name, expected_interval_minutes=5):
+        """Find exact missing time intervals in the last 24 hours"""
+        now = datetime.now()
+        cutoff_24h = now - timedelta(hours=24)
         
-        issues = 0
+        # Generate expected time series for last 24 hours
+        expected_times = pd.date_range(
+            start=cutoff_24h.replace(second=0, microsecond=0),
+            end=now.replace(second=0, microsecond=0),
+            freq=f'{expected_interval_minutes}min'
+        )
+        
+        if len(df) == 0:
+            return list(expected_times), f"No data available - missing all {len(expected_times)} intervals"
+        
+        # Find date column
+        date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+        if not date_cols:
+            if hasattr(df.index, 'name') and 'date' in str(df.index.name).lower():
+                actual_times = pd.to_datetime(df.index)
+            else:
+                return [], "No date column found"
+        else:
+            actual_times = pd.to_datetime(df[date_cols[0]])
+        
+        # Filter to recent data only
+        recent_actual = actual_times[actual_times >= cutoff_24h]
+        recent_actual = recent_actual.round(f'{expected_interval_minutes}min')  # Round to nearest interval
+        
+        # Find missing intervals
+        missing_times = expected_times.difference(recent_actual)
+        
+        if len(missing_times) == 0:
+            return [], None
+        
+        # Group consecutive missing periods
+        missing_list = missing_times.sort_values().tolist()
+        if len(missing_list) > 10:  # If too many, summarize
+            gap_summary = f"Missing {len(missing_list)} intervals ({missing_list[0].strftime('%m-%d %H:%M')} to {missing_list[-1].strftime('%m-%d %H:%M')})"
+        else:
+            gap_summary = f"Missing {len(missing_list)} intervals: " + ", ".join([t.strftime('%m-%d %H:%M') for t in missing_list[:5]])
+            if len(missing_list) > 5:
+                gap_summary += f" ... and {len(missing_list)-5} more"
+        
+        return missing_list, gap_summary
+        
+    def check_data_gaps(self, df, name, expected_interval_minutes=5):
+        """Check for gaps in time series data with focus on recent periods"""
+        issues = []
+        
+        # Check for missing intervals in last 24 hours (priority)
+        missing_intervals, gap_summary = self.find_missing_intervals(df, name, expected_interval_minutes)
+        
+        if gap_summary:
+            issues.append(f"🚨 RECENT: {gap_summary}")
+            # Store missing intervals for potential repair
+            if not hasattr(self, 'missing_data'):
+                self.missing_data = {}
+            self.missing_data[name] = missing_intervals
+        
+        # Quick check for older gaps (lower priority)
+        if len(df) > 0:
+            date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+            if date_cols:
+                dates = pd.to_datetime(df[date_cols[0]])
+            elif hasattr(df.index, 'name') and 'date' in str(df.index.name).lower():
+                dates = pd.to_datetime(df.index)
+            else:
+                return issues
+                
+            # Check for large historical gaps (>4 hours)
+            dates_sorted = dates.sort_values().drop_duplicates()
+            if len(dates_sorted) > 1:
+                time_diffs = dates_sorted.diff()
+                large_gaps = time_diffs[time_diffs > pd.Timedelta(hours=4)]
+                if len(large_gaps) > 0:
+                    max_gap_hours = large_gaps.max().total_seconds() / 3600
+                    issues.append(f"📊 Historical: {len(large_gaps)} gaps >4h, largest: {max_gap_hours:.0f}h")
+        
+        return issues
+    
+    def run_integrity_check(self):
+        """Comprehensive data integrity check"""
+        self.add_log("🔍 Running comprehensive data integrity check...")
+        
+        total_issues = 0
+        
         for name, info in self.data_sources.items():
+            self.add_log(f"📊 Checking {name}...")
+            
+            # Basic file status
             status = self.get_file_status(Path(info['file']))
             
             if status['health'] == 'error':
                 self.add_log(f"❌ {name}: {status['status_text']}")
-                issues += 1
-            elif status['age_hours'] > 0.5:  # Over 30 minutes old
+                total_issues += 1
+                continue
+            
+            # Age check
+            if status['age_hours'] > 0.5:  # Over 30 minutes old
                 age_minutes = int(status['age_hours'] * 60)
                 self.add_log(f"⚠️  {name}: Data is {age_minutes} minutes old (threshold: 30 min)")
-                issues += 1
-            else:
-                self.add_log(f"✅ {name}: {status['records']:,} records, {status['latest_data']}")
+                total_issues += 1
+            
+            # Detailed gap analysis
+            try:
+                file_path = Path(info['file'])
+                if file_path.exists():
+                    df = pd.read_parquet(file_path)
+                    
+                    # Determine expected interval
+                    expected_interval = 30 if name == 'Rooftop Solar' else 5
+                    
+                    # Check for gaps
+                    gap_issues = self.check_data_gaps(df, name, expected_interval)
+                    
+                    if gap_issues:
+                        for issue in gap_issues:
+                            self.add_log(f"⚠️  {name}: {issue}")
+                            total_issues += 1
+                    else:
+                        self.add_log(f"✅ {name}: {status['records']:,} records, no gaps detected")
+                        
+                    # Additional checks for specific data types
+                    if name == 'Generation' and len(df) > 0:
+                        # Check DUID count per timestamp
+                        if 'duid' in df.columns and 'settlementdate' in df.columns:
+                            duid_counts = df.groupby('settlementdate')['duid'].count()
+                            low_counts = duid_counts[duid_counts < 400]  # Should have ~470 DUIDs
+                            if len(low_counts) > 0:
+                                self.add_log(f"⚠️  {name}: {len(low_counts)} timestamps with < 400 DUIDs")
+                                total_issues += 1
+                    
+                    elif name == 'Prices' and len(df) > 0:
+                        # Check region count per timestamp
+                        if 'REGIONID' in df.columns:
+                            if hasattr(df.index, 'name') and 'date' in str(df.index.name).lower():
+                                region_counts = df.groupby(df.index)['REGIONID'].count()
+                            else:
+                                region_counts = df.groupby('SETTLEMENTDATE')['REGIONID'].count()
+                            low_counts = region_counts[region_counts < 5]  # Should have 5 regions
+                            if len(low_counts) > 0:
+                                self.add_log(f"⚠️  {name}: {len(low_counts)} timestamps with < 5 regions")
+                                total_issues += 1
+                
+            except Exception as e:
+                self.add_log(f"❌ {name}: Error analyzing data - {str(e)[:50]}...")
+                total_issues += 1
         
-        if issues == 0:
+        # Summary
+        if total_issues == 0:
             self.add_log("🎉 All integrity checks passed!")
         else:
-            self.add_log(f"⚠️  Found {issues} integrity issues")
+            self.add_log(f"⚠️  Found {total_issues} integrity issues total")
+            
+            # Check if we have recent missing data that can be repaired
+            if hasattr(self, 'missing_data') and self.missing_data:
+                recent_missing = sum(1 for name, intervals in self.missing_data.items() if intervals)
+                if recent_missing > 0:
+                    self.add_log(f"💡 {recent_missing} data sources have recent gaps that can be repaired")
+                    self.add_log("   Use 'Fix Missing Data' button to repair recent gaps")
         
-        return issues == 0
+        return total_issues == 0
+    
+    def repair_missing_data(self):
+        """Repair missing data for recent periods"""
+        if not hasattr(self, 'missing_data') or not self.missing_data:
+            self.add_log("❌ No missing data identified. Run integrity check first.")
+            return
+        
+        self.add_log("🔧 Starting data repair process...")
+        
+        repaired_count = 0
+        for name, missing_intervals in self.missing_data.items():
+            if not missing_intervals:
+                continue
+                
+            self.add_log(f"🔄 Repairing {name}: {len(missing_intervals)} missing intervals")
+            
+            try:
+                # Call the real repair method for this data source
+                success = self.repair_data_source(name, missing_intervals)
+                
+                if success:
+                    self.add_log(f"✅ {name}: Successfully repaired {len(missing_intervals)} intervals")
+                    repaired_count += 1
+                else:
+                    self.add_log(f"❌ {name}: Repair failed - data may not be available")
+                    
+            except Exception as e:
+                self.add_log(f"❌ {name}: Repair error - {str(e)[:50]}...")
+        
+        if repaired_count > 0:
+            self.add_log(f"🎉 Repair complete! Fixed {repaired_count} data sources")
+            self.add_log("💡 Run integrity check again to verify repairs")
+        else:
+            self.add_log("⚠️  No data could be repaired. Check network or data availability")
+        
+        # Clear missing data tracker
+        self.missing_data = {}
+    
+    def repair_data_source(self, name, missing_intervals):
+        """Repair missing data for a specific data source"""
+        try:
+            # Import collectors
+            import sys
+            sys.path.append('src')
+            
+            if name == 'Prices':
+                from aemo_updater.collectors.price_collector import PriceCollector
+                collector = PriceCollector()
+                return collector.backfill_missing_data(missing_intervals)
+            
+            elif name == 'Generation':
+                from aemo_updater.collectors.generation_collector import GenerationCollector
+                collector = GenerationCollector()
+                # Add backfill method if it exists
+                if hasattr(collector, 'backfill_missing_data'):
+                    return collector.backfill_missing_data(missing_intervals)
+                else:
+                    self.add_log(f"⚠️  {name}: Backfill not yet implemented")
+                    return False
+            
+            elif name == 'Transmission':
+                # Transmission backfill would be implemented similarly
+                self.add_log(f"⚠️  {name}: Backfill not yet implemented")
+                return False
+                
+            elif name == 'Rooftop Solar':
+                # Rooftop solar backfill would be implemented similarly
+                self.add_log(f"⚠️  {name}: Backfill not yet implemented")
+                return False
+            
+            else:
+                self.add_log(f"❌ {name}: Unknown data source")
+                return False
+                
+        except ImportError as e:
+            self.add_log(f"❌ {name}: Import error - {str(e)[:50]}...")
+            return False
+        except Exception as e:
+            self.add_log(f"❌ {name}: Repair error - {str(e)[:50]}...")
+            return False
     
     def create_controls(self) -> pn.Row:
         """Create manual control buttons"""
@@ -273,12 +493,22 @@ class AEMOStatusDashboard:
         
         def on_integrity_check(event):
             self.run_integrity_check()
+            # Trigger a refresh to show the log updates
+            if hasattr(self, 'refresh_dashboard'):
+                self.refresh_dashboard()
+        
+        def on_repair_data(event):
+            self.repair_missing_data()
+            # Trigger a refresh to show the log updates
+            if hasattr(self, 'refresh_dashboard'):
+                self.refresh_dashboard()
         
         def on_clear_log(event):
             self.log_messages.clear()
             self.add_log("📝 Log cleared")
         
-        controls = pn.Row(
+        # First row of controls
+        controls_row1 = pn.Row(
             pn.widgets.Button(
                 name="🔄 Refresh Status", 
                 button_type="primary",
@@ -291,13 +521,26 @@ class AEMOStatusDashboard:
                 on_click=on_integrity_check,
                 width=140
             ),
+            margin=(5, 0)
+        )
+        
+        # Second row of controls
+        controls_row2 = pn.Row(
+            pn.widgets.Button(
+                name="🔧 Fix Missing Data", 
+                button_type="light",
+                on_click=on_repair_data,
+                width=140
+            ),
             pn.widgets.Button(
                 name="🗑️ Clear Log", 
                 on_click=on_clear_log,
                 width=140
             ),
-            margin=(10, 0)
+            margin=(5, 0)
         )
+        
+        controls = pn.Column(controls_row1, controls_row2, margin=(10, 0))
         
         return controls
     
