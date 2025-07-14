@@ -2,6 +2,6 @@
 User interface components for AEMO Data Updater
 """
 
-from .status_dashboard import StatusDashboard
+from .simple_dashboard import SimpleStatusDashboard
 
-__all__ = ['StatusDashboard']
+__all__ = ['SimpleStatusDashboard']

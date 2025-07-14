@@ -1,96 +1,93 @@
 #!/usr/bin/env python3
 """
-AEMO Generation Data Collector
+AEMO Generation Data Collector - Simple Implementation
 Downloads AEMO SCADA data and stores in efficient parquet format.
+Adapted from working generation update code
 """
 
+import os
+import re
+import csv
+import zipfile
+import pickle
 import pandas as pd
+from datetime import datetime
+from io import StringIO, BytesIO
+from pathlib import Path
+from typing import Optional, Dict, Any, List
 import requests
 from bs4 import BeautifulSoup
-import time
-import os
-from datetime import datetime
-import re
-import zipfile
-from io import BytesIO
-from pathlib import Path
-from typing import Optional, Dict, Any
 
-from .base_collector import BaseCollector
-from ..config import get_config, get_logger
-
-logger = get_logger(__name__)
+from ..config import get_config, get_logger, HTTP_HEADERS
 
 
-class GenerationCollector(BaseCollector):
+class GenerationCollector:
     """
     AEMO Generation Data Collector
-    Downloads and processes SCADA data from AEMO website
+    Downloads and processes SCADA data from NEMWEB
     """
     
     def __init__(self):
         """Initialize the collector with configuration"""
-        super().__init__()
+        self.config = get_config()
+        self.logger = get_logger(self.__class__.__name__)
+        self.name = "generation"
+        self.parquet_file = self.config.gen_output_file
+        
+        # URL for SCADA data
         self.base_url = "http://nemweb.com.au/Reports/CURRENT/Dispatch_SCADA/"
-        self.gen_output_file = self.config.gen_output_file
-        self.gen_output_backup = self.gen_output_file.with_suffix('.pkl')  # For migration
-        self.last_processed_file = None
+        
+        # HTTP session with required headers
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        })
         
         # Ensure the directory exists
-        self.gen_output_file.parent.mkdir(parents=True, exist_ok=True)
+        self.parquet_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # Initialize or load existing DataFrame
-        self.gen_output = self.load_or_create_dataframe()
+        # Load gen_info for DUID mappings
+        self.gen_info = self.load_gen_info()
         
-    def load_or_create_dataframe(self):
-        """Load existing gen_output DataFrame or create new one"""
-        # Try parquet first
-        if self.gen_output_file.exists():
-            try:
-                df = pd.read_parquet(self.gen_output_file)
-                logger.info(f"Loaded existing gen_output.parquet with {len(df)} records")
-                return df
-            except Exception as e:
-                logger.error(f"Error loading parquet file: {e}")
+        # Track unknown DUIDs
+        self.unknown_duids = set()
         
-        # Fall back to pickle file if parquet doesn't exist
-        if self.gen_output_backup.exists():
-            try:
-                df = pd.read_pickle(self.gen_output_backup)
-                logger.info(f"Loaded existing gen_output.pkl with {len(df)} records")
-                logger.info("Converting to parquet format...")
-                
-                # Save as parquet and remove pickle
-                df.to_parquet(self.gen_output_file, compression='snappy', index=False)
-                
-                # Get file sizes for comparison
-                pkl_size = self.gen_output_backup.stat().st_size / (1024*1024)
-                parquet_size = self.gen_output_file.stat().st_size / (1024*1024)
-                savings = ((pkl_size - parquet_size) / pkl_size) * 100
-                
-                logger.info(f"Migration complete: {pkl_size:.2f}MB -> {parquet_size:.2f}MB ({savings:.1f}% savings)")
-                
-                # Keep backup for safety
-                backup_name = self.gen_output_backup.with_name(self.gen_output_backup.stem + '_backup.pkl')
-                self.gen_output_backup.rename(backup_name)
-                logger.info(f"Backup created: {backup_name}")
-                
-                return df
-            except Exception as e:
-                logger.error(f"Error loading existing pickle file: {e}")
-                
-        # Create new DataFrame with proper structure
-        df = pd.DataFrame(columns=['settlementdate', 'duid', 'scadavalue'])
-        df['settlementdate'] = pd.to_datetime(df['settlementdate'])
-        logger.info("Created new gen_output DataFrame")
-        return df
-    
-    def get_latest_file_url(self):
-        """Get the URL of the most recent SCADA file"""
+        self.logger.info(f"Generation collector initialized - output: {self.parquet_file}")
+        
+    def load_gen_info(self) -> Optional[pd.DataFrame]:
+        """Load gen_info.pkl for DUID to fuel/region mappings"""
         try:
-            response = requests.get(self.base_url, timeout=30, headers=self.headers)
+            # Look for gen_info.pkl in various locations
+            base_path = Path.home() / 'Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot'
+            possible_paths = [
+                self.parquet_file.parent / 'gen_info.pkl',
+                base_path / 'genhist/gen_info.pkl',
+                base_path / 'aemo-energy-dashboard/data/gen_info.pkl'
+            ]
+            
+            for path in possible_paths:
+                if path.exists():
+                    self.logger.info(f"Loading gen_info from: {path}")
+                    gen_info = pd.read_pickle(path)
+                    self.logger.info(f"Loaded {len(gen_info)} DUID mappings")
+                    return gen_info
+            
+            self.logger.warning("gen_info.pkl not found - DUID mapping will not be available")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error loading gen_info: {e}")
+            return None
+    
+    def get_latest_urls(self) -> List[str]:
+        """Get URLs for latest SCADA files"""
+        try:
+            # Get the main page
+            response = self.session.get(self.base_url, timeout=30)
             response.raise_for_status()
             
+            # Parse HTML to find files
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Find all ZIP file links
@@ -101,61 +98,58 @@ class GenerationCollector(BaseCollector):
                     zip_files.append(href)
             
             if not zip_files:
-                logger.warning("No SCADA ZIP files found")
-                return None
-                
-            # Sort to get the most recent (AEMO files have timestamp in filename)
+                self.logger.warning("No SCADA ZIP files found")
+                return []
+            
+            # Sort to get the most recent
             zip_files.sort(reverse=True)
             latest_file = zip_files[0]
             
-            # Extract timestamp from filename for logging
-            timestamp_match = re.search(r'(\d{12})', latest_file)
-            if timestamp_match:
-                timestamp = timestamp_match.group(1)
-                logger.info(f"Latest file: {latest_file} (timestamp: {timestamp})")
-            
-            # Construct proper URL - href already contains the full path from root
+            # Construct proper URL
             if latest_file.startswith('/'):
                 file_url = "http://nemweb.com.au" + latest_file
             else:
                 file_url = self.base_url + latest_file
-                
-            return file_url
+            
+            self.logger.info(f"Found latest SCADA file: {latest_file}")
+            return [file_url]
             
         except Exception as e:
-            logger.error(f"Error getting latest file URL: {e}")
+            self.logger.error(f"Error getting SCADA URLs: {e}")
+            return []
+    
+    def download_file(self, url: str) -> Optional[bytes]:
+        """Download a file from URL"""
+        try:
+            response = self.session.get(url, timeout=60)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            self.logger.error(f"Error downloading {url}: {e}")
             return None
     
-    def download_and_parse_file(self, file_url):
-        """Download and parse SCADA ZIP file"""
+    def parse_data(self, content: bytes) -> pd.DataFrame:
+        """
+        Parse AEMO SCADA CSV data
+        Returns DataFrame with columns: settlementdate, duid, scadavalue
+        """
         try:
-            response = requests.get(file_url, timeout=60, headers=self.headers)
-            response.raise_for_status()
-            
-            # Extract ZIP file
-            with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
-                # Get the first (and usually only) CSV file in the ZIP
-                csv_files = [name for name in zip_file.namelist() if name.endswith('.CSV')]
-                
+            # Extract CSV from ZIP file
+            with zipfile.ZipFile(BytesIO(content)) as zf:
+                csv_files = [f for f in zf.namelist() if f.endswith('.CSV')]
                 if not csv_files:
-                    logger.error("No CSV files found in ZIP archive")
-                    return None
-                    
-                csv_filename = csv_files[0]
-                logger.info(f"Extracting and parsing: {csv_filename}")
+                    self.logger.error("No CSV file found in ZIP")
+                    return pd.DataFrame()
                 
-                # Read CSV content from ZIP
-                with zip_file.open(csv_filename) as csv_file:
-                    csv_content = csv_file.read().decode('utf-8')
+                csv_content = zf.read(csv_files[0]).decode('utf-8')
             
             # Parse CSV content
             lines = csv_content.strip().split('\n')
-            
-            # Find data lines (start with 'D')
             data_rows = []
+            
             for line in lines:
+                # Look for UNIT_SCADA data rows
                 if line.startswith('D,DISPATCH,UNIT_SCADA'):
-                    # Split CSV line and extract required fields
                     fields = line.split(',')
                     if len(fields) >= 7:  # Ensure we have all required fields
                         settlementdate = fields[4].strip('"')
@@ -166,138 +160,187 @@ class GenerationCollector(BaseCollector):
                             scadavalue = float(scadavalue)
                         except ValueError:
                             continue  # Skip invalid numeric values
-                            
+                        
                         data_rows.append({
                             'settlementdate': settlementdate,
                             'duid': duid,
                             'scadavalue': scadavalue
                         })
+                        
+                        # Track unknown DUIDs
+                        if self.gen_info is not None and duid not in self.gen_info['DUID'].values:
+                            self.unknown_duids.add(duid)
             
-            if data_rows:
-                df = pd.DataFrame(data_rows)
-                df['settlementdate'] = pd.to_datetime(df['settlementdate'])
-                logger.info(f"Parsed {len(df)} records from {file_url}")
-                return df
-            else:
-                logger.warning("No valid data rows found in file")
-                return None
-                
+            if not data_rows:
+                self.logger.warning("No valid UNIT_SCADA records extracted")
+                return pd.DataFrame()
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(data_rows)
+            df['settlementdate'] = pd.to_datetime(df['settlementdate'])
+            
+            self.logger.info(f"Extracted {len(df)} SCADA records")
+            
+            # Log sample of data
+            unique_duids = df['duid'].nunique()
+            settlement_time = df['settlementdate'].iloc[0]
+            self.logger.info(f"  Settlement time: {settlement_time}")
+            self.logger.info(f"  Unique DUIDs: {unique_duids}")
+            
+            # Log unknown DUIDs if any
+            if self.unknown_duids:
+                self.logger.warning(f"Found {len(self.unknown_duids)} unknown DUIDs")
+                for duid in list(self.unknown_duids)[:5]:  # Show first 5
+                    self.logger.warning(f"  Unknown DUID: {duid}")
+            
+            return df
+            
         except Exception as e:
-            logger.error(f"Error downloading/parsing file {file_url}: {e}")
-            return None
+            self.logger.error(f"Error parsing SCADA data: {e}")
+            return pd.DataFrame()
     
-    def is_new_data(self, new_df):
-        """Check if the new data contains records not already in gen_output"""
-        if self.gen_output.empty:
+    def validate_data(self, df: pd.DataFrame) -> bool:
+        """Validate generation data"""
+        if df.empty:
+            return False
+        
+        # Check required columns
+        required_cols = ['settlementdate', 'duid', 'scadavalue']
+        if not all(col in df.columns for col in required_cols):
+            self.logger.error(f"Missing required columns. Found: {df.columns.tolist()}")
+            return False
+        
+        # Validate data types and ranges
+        try:
+            # scadavalue should be numeric
+            if not pd.api.types.is_numeric_dtype(df['scadavalue']):
+                self.logger.error("scadavalue column is not numeric")
+                return False
+            
+            # Check for reasonable generation ranges (MW)
+            if df['scadavalue'].min() < -100:  # Some negative values are ok (auxiliary load)
+                self.logger.warning(f"Very negative generation: {df['scadavalue'].min():.2f} MW")
+            
+            if df['scadavalue'].max() > 5000:  # Largest units are ~750MW
+                self.logger.warning(f"Very high generation: {df['scadavalue'].max():.2f} MW")
+            
             return True
             
-        if new_df is None or new_df.empty:
-            return False
-            
-        # Get the latest timestamp in existing data
-        latest_existing = self.gen_output['settlementdate'].max()
-        
-        # Check if new data has more recent timestamps
-        latest_new = new_df['settlementdate'].max()
-        
-        is_new = latest_new > latest_existing
-        logger.info(f"Latest existing: {latest_existing}, Latest new: {latest_new}, Is new: {is_new}")
-        
-        return is_new
-    
-    def add_new_data(self, new_df):
-        """Add new data to gen_output DataFrame and save"""
-        if new_df is None or new_df.empty:
-            return
-            
-        try:
-            # If gen_output is empty, just use the new data
-            if self.gen_output.empty:
-                self.gen_output = new_df.copy()
-            else:
-                # Filter out any duplicate records based on settlementdate and duid
-                latest_existing = self.gen_output['settlementdate'].max()
-                truly_new = new_df[new_df['settlementdate'] > latest_existing]
-                
-                if not truly_new.empty:
-                    self.gen_output = pd.concat([self.gen_output, truly_new], ignore_index=True)
-                    logger.info(f"Added {len(truly_new)} new records")
-                else:
-                    logger.info("No truly new records to add")
-                    return
-            
-            # Sort by settlement date
-            self.gen_output = self.gen_output.sort_values('settlementdate').reset_index(drop=True)
-            
-            # Save to parquet file with compression
-            self.gen_output.to_parquet(self.gen_output_file, compression='snappy', index=False)
-            
-            # Get file size for logging
-            file_size = self.gen_output_file.stat().st_size / (1024*1024)
-            logger.info(f"Saved gen_output.parquet with {len(self.gen_output)} total records ({file_size:.2f}MB)")
-            
         except Exception as e:
-            logger.error(f"Error adding new data: {e}")
+            self.logger.error(f"Validation error: {e}")
+            return False
+    
+    def load_historical_data(self) -> pd.DataFrame:
+        """Load the historical generation data from parquet file"""
+        try:
+            if self.parquet_file.exists():
+                df = pd.read_parquet(self.parquet_file)
+                self.logger.info(f"Loaded historical data: {len(df)} records, latest: {df['settlementdate'].max()}")
+                return df
+            else:
+                # Check for legacy pickle file
+                pkl_file = self.parquet_file.with_suffix('.pkl')
+                if pkl_file.exists():
+                    self.logger.info(f"Found legacy pickle file: {pkl_file}")
+                    df = pd.read_pickle(pkl_file)
+                    
+                    # Migrate to parquet
+                    self.logger.info("Migrating to parquet format...")
+                    df.to_parquet(self.parquet_file, compression='snappy', index=False)
+                    
+                    # Compare sizes
+                    pkl_size = pkl_file.stat().st_size / (1024*1024)
+                    parquet_size = self.parquet_file.stat().st_size / (1024*1024)
+                    savings = ((pkl_size - parquet_size) / pkl_size) * 100
+                    
+                    self.logger.info(f"Migration complete: {pkl_size:.2f}MB -> {parquet_size:.2f}MB ({savings:.1f}% savings)")
+                    
+                    # Backup pickle file
+                    backup_name = pkl_file.with_name(pkl_file.stem + '_backup.pkl')
+                    pkl_file.rename(backup_name)
+                    self.logger.info(f"Backup created: {backup_name}")
+                    
+                    return df
+                else:
+                    self.logger.info("No historical data file found, starting fresh")
+                    return pd.DataFrame(columns=['settlementdate', 'duid', 'scadavalue'])
+        except Exception as e:
+            self.logger.error(f"Error loading historical data: {e}")
+            return pd.DataFrame(columns=['settlementdate', 'duid', 'scadavalue'])
+    
+    def save_data(self, df: pd.DataFrame):
+        """Save the data to parquet file"""
+        try:
+            df.to_parquet(self.parquet_file, compression='snappy', index=False)
+            file_size = self.parquet_file.stat().st_size / (1024*1024)
+            self.logger.info(f"Saved {len(df)} records to {self.parquet_file} ({file_size:.2f} MB)")
+        except Exception as e:
+            self.logger.error(f"Error saving data: {e}")
+    
+    def update_data(self) -> bool:
+        """Main update method - download and process new data"""
+        self.logger.info("Checking for new generation data...")
+        
+        # Load existing data
+        historical_df = self.load_historical_data()
+        latest_timestamp = historical_df['settlementdate'].max() if not historical_df.empty else pd.Timestamp.min
+        
+        # Get latest file URL
+        urls = self.get_latest_urls()
+        if not urls:
+            self.logger.warning("No URLs found")
+            return False
+        
+        # Download and parse
+        content = self.download_file(urls[0])
+        if not content:
+            return False
+        
+        new_df = self.parse_data(content)
+        if new_df.empty:
+            return False
+        
+        # Validate
+        if not self.validate_data(new_df):
+            return False
+        
+        # Check if we have new data
+        new_timestamp = new_df['settlementdate'].max()
+        if new_timestamp <= latest_timestamp:
+            self.logger.info("No new generation data - data not newer than existing")
+            return False
+        
+        # Filter for only newer records
+        newer_records = new_df[new_df['settlementdate'] > latest_timestamp]
+        if newer_records.empty:
+            self.logger.info("No new records found")
+            return False
+        
+        # Log new data summary
+        self.logger.info(f"New generation data found for {newer_records['settlementdate'].iloc[0]}:")
+        self.logger.info(f"  Records: {len(newer_records)}")
+        self.logger.info(f"  DUIDs: {newer_records['duid'].nunique()}")
+        self.logger.info(f"  Total MW: {newer_records['scadavalue'].sum():.1f}")
+        
+        # Combine and sort
+        updated_df = pd.concat([historical_df, newer_records], ignore_index=True)
+        updated_df = updated_df.sort_values('settlementdate').reset_index(drop=True)
+        
+        # Save
+        self.save_data(updated_df)
+        
+        self.logger.info(f"Added {len(newer_records)} new records. Total: {len(updated_df)}")
+        return True
     
     def update(self) -> bool:
-        """Run a single update cycle"""
-        try:
-            # Get latest file URL
-            latest_url = self.get_latest_file_url()
-            
-            if latest_url and latest_url != self.last_processed_file:
-                logger.info(f"Processing new file: {latest_url}")
-                
-                # Download and parse
-                new_data = self.download_and_parse_file(latest_url)
-                
-                # Check if it's truly new data
-                if self.is_new_data(new_data):
-                    self.add_new_data(new_data)
-                    self.last_processed_file = latest_url
-                    logger.info(f"Updated data summary: {self.get_summary()}")
-                    return True
-                else:
-                    logger.info("File exists but contains no new data")
-                    return False
-                    
-            else:
-                logger.info("No new files found")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error in update cycle: {e}")
-            return False
-    
-    def get_summary(self) -> Dict[str, Any]:
-        """Get summary statistics of the current data"""
-        if self.gen_output.empty:
-            return {
-                "status": "No data",
-                "records": 0,
-                "latest_update": None,
-                "file_size_mb": 0
-            }
-        
-        total_records = len(self.gen_output)
-        latest_update = self.gen_output['settlementdate'].max()
-        oldest_record = self.gen_output['settlementdate'].min()
-        unique_duids = self.gen_output['duid'].nunique()
-        file_size = self.gen_output_file.stat().st_size / (1024*1024) if self.gen_output_file.exists() else 0
-        
-        return {
-            "status": "OK",
-            "records": total_records,
-            "latest_update": latest_update,
-            "oldest_record": oldest_record,
-            "unique_duids": unique_duids,
-            "file_size_mb": round(file_size, 2),
-            "date_range": f"{oldest_record} to {latest_update}"
-        }
+        """Alias for update_data to match expected interface"""
+        return self.update_data()
     
     def check_integrity(self) -> Dict[str, Any]:
         """Check data integrity"""
-        if self.gen_output.empty:
+        df = self.load_historical_data()
+        
+        if df.empty:
             return {
                 "status": "No data",
                 "issues": ["No data found in parquet file"]
@@ -305,95 +348,36 @@ class GenerationCollector(BaseCollector):
         
         issues = []
         
-        # Check for gaps in data
-        df_sorted = self.gen_output.sort_values('settlementdate')
-        time_diffs = df_sorted['settlementdate'].diff()
+        # Check for gaps
+        df_sorted = df.sort_values('settlementdate')
+        
+        # Group by timestamp to check completeness
+        records_per_time = df_sorted.groupby('settlementdate').size()
+        
+        # Check for timestamps with too few records (should have ~300+ DUIDs)
+        low_count = records_per_time[records_per_time < 200]
+        if len(low_count) > 0:
+            issues.append(f"Found {len(low_count)} timestamps with < 200 DUIDs")
+        
+        # Check for time gaps
+        unique_times = df_sorted['settlementdate'].unique()
+        time_series = pd.Series(unique_times).sort_values()
+        time_diffs = time_series.diff()
         expected_interval = pd.Timedelta(minutes=5)
         
-        # Find gaps greater than expected interval
         gaps = time_diffs[time_diffs > expected_interval * 1.5]
         if len(gaps) > 0:
             issues.append(f"Found {len(gaps)} time gaps in data")
         
         # Check for duplicates
-        duplicates = self.gen_output.duplicated(subset=['settlementdate', 'duid'])
+        duplicates = df.duplicated(subset=['settlementdate', 'duid'])
         if duplicates.any():
             issues.append(f"Found {duplicates.sum()} duplicate records")
         
         return {
             "status": "OK" if not issues else "Issues found",
             "issues": issues,
-            "records": len(self.gen_output),
+            "records": len(df),
+            "unique_duids": df['duid'].nunique(),
             "date_range": f"{df_sorted['settlementdate'].min()} to {df_sorted['settlementdate'].max()}"
         }
-    
-    def backfill(self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> bool:
-        """
-        Backfill historical data - not typically available for generation data
-        as AEMO only keeps recent files in CURRENT directory
-        """
-        logger.warning("Generation data backfill not implemented - historical data not readily available")
-        return False
-
-
-def migrate_existing_pickle_to_parquet(config):
-    """
-    Standalone function to migrate existing pickle file to parquet
-    """
-    pkl_file = Path(config.gen_output_file).with_suffix('.pkl')
-    parquet_file = Path(config.gen_output_file)
-    
-    if not pkl_file.exists():
-        logger.info(f"No pickle file found at: {pkl_file}")
-        return False
-    
-    if parquet_file.exists():
-        logger.info(f"Parquet file already exists at: {parquet_file}")
-        return False
-    
-    try:
-        logger.info(f"Loading pickle file: {pkl_file}")
-        df = pd.read_pickle(pkl_file)
-        
-        pkl_size = pkl_file.stat().st_size / (1024*1024)
-        logger.info(f"Loaded {len(df)} records ({pkl_size:.2f}MB)")
-        
-        logger.info(f"Saving as parquet: {parquet_file}")
-        parquet_file.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(parquet_file, compression='snappy', index=False)
-        
-        parquet_size = parquet_file.stat().st_size / (1024*1024)
-        savings = ((pkl_size - parquet_size) / pkl_size) * 100
-        
-        logger.info(f"Migration complete: {pkl_size:.2f}MB -> {parquet_size:.2f}MB ({savings:.1f}% savings)")
-        
-        # Create backup
-        backup_file = pkl_file.with_name(pkl_file.stem + '_backup.pkl')
-        pkl_file.rename(backup_file)
-        logger.info(f"Original file backed up as: {backup_file}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Migration failed: {e}")
-        return False
-
-
-def main():
-    """Main function to run the generation data collector"""
-    logger.info("AEMO Generation Data Collector starting...")
-    
-    # Create collector instance
-    collector = GenerationCollector()
-    
-    try:
-        # Run single update
-        collector.update()
-    except KeyboardInterrupt:
-        logger.info("Collector stopped by user")
-    except Exception as e:
-        logger.error(f"Collector error: {e}")
-
-
-if __name__ == "__main__":
-    main()

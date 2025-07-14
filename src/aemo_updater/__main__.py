@@ -9,7 +9,6 @@ from datetime import datetime
 
 from .config import get_logger
 from .service import AemoDataService
-from .integrity import run_integrity_check
 
 logger = get_logger(__name__)
 
@@ -51,7 +50,7 @@ def main():
         
     elif args.command == 'ui':
         logger.info("Starting Status UI...")
-        from .ui.status_dashboard import run_dashboard
+        from .ui.simple_dashboard import run_dashboard
         run_dashboard()
         
     elif args.command == 'integrity':

@@ -14,7 +14,9 @@ except ImportError:
     print("Warning: python-dotenv not available, using system environment variables only")
 
 # Base paths
-BASE_PATH = Path(os.getenv('AEMO_DATA_PATH', '/Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot'))
+# Use Path.home() for cross-machine compatibility with iCloud
+DEFAULT_AEMO_PATH = Path.home() / 'Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot'
+BASE_PATH = Path(os.getenv('AEMO_DATA_PATH', str(DEFAULT_AEMO_PATH)))
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 LOG_PATH = PROJECT_ROOT / 'logs'
 DATA_PATH = BASE_PATH  # Parquet files stored in main AEMO_spot directory
@@ -157,7 +159,7 @@ def get_config():
     
     # Data file paths
     config.gen_output_file = Path(os.getenv('GEN_OUTPUT_FILE', str(PARQUET_FILES['generation']['path'])))
-    config.spot_hist_file = PARQUET_FILES['price']['path'] 
+    config.spot_hist_file = Path(os.getenv('SPOT_HIST_FILE', str(PARQUET_FILES['price']['path']))) 
     config.transmission_output_file = PARQUET_FILES['transmission']['path']
     config.rooftop_solar_file = PARQUET_FILES['rooftop']['path']
     
