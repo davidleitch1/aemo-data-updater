@@ -507,14 +507,17 @@ class AEMOStatusDashboard:
             self.log_messages.clear()
             self.add_log("📝 Log cleared")
         
+        # Create refresh button separately so we can add periodic callback
+        self.refresh_button = pn.widgets.Button(
+            name="🔄 Refresh Status", 
+            button_type="primary",
+            on_click=on_refresh,
+            width=140
+        )
+        
         # First row of controls
         controls_row1 = pn.Row(
-            pn.widgets.Button(
-                name="🔄 Refresh Status", 
-                button_type="primary",
-                on_click=on_refresh,
-                width=140
-            ),
+            self.refresh_button,
             pn.widgets.Button(
                 name="🔍 Check Integrity", 
                 button_type="success",
@@ -607,6 +610,21 @@ class AEMOStatusDashboard:
         self.refresh_dashboard = refresh_dashboard
         
         return main_content
+    
+    def setup_periodic_refresh(self):
+        """Set up periodic refresh after server starts"""
+        def periodic_refresh():
+            self.add_log("🔄 Auto-refresh: Updating status...")
+            if hasattr(self, 'refresh_dashboard'):
+                self.refresh_dashboard()
+        
+        # Add periodic callback that runs every 30 seconds
+        self.periodic_callback = pn.state.add_periodic_callback(
+            periodic_refresh, 
+            period=30000,  # 30 seconds in milliseconds
+            start=True
+        )
+        self.add_log("✅ Auto-refresh enabled (every 30 seconds)")
 
 
 def main():
@@ -631,8 +649,14 @@ def main():
         print("\n🔄 Auto-refresh every 30 seconds")
         print("🛑 Press Ctrl+C to stop")
         
-        # Serve dashboard without auto-refresh for now
-        app.show(port=5011, open=True, autoreload=False)
+        # Create a function that returns the app and sets up periodic refresh
+        def create_app():
+            # Set up periodic refresh after server starts
+            pn.state.onload(dashboard.setup_periodic_refresh)
+            return app
+        
+        # Serve the dashboard with the setup function
+        pn.serve(create_app, port=5011, show=True, autoreload=False)
         
     except KeyboardInterrupt:
         print("\n👋 Dashboard stopped by user")
