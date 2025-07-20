@@ -12,9 +12,18 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 from bs4 import BeautifulSoup
 import time
+import os
+from dotenv import load_dotenv
+
+# Import alert system
+from ..alerts.base_alert import Alert, AlertSeverity
+from ..alerts.email_sender import EmailSender
+
+# Load environment variables
+load_dotenv()
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -65,7 +74,88 @@ class UnifiedAEMOCollector:
         # Collect all data types every cycle (no frequency limiting)
         self.cycle_count = 0
         
+        # Track known DUIDs
+        self.known_duids_file = self.data_path / 'known_duids.txt'
+        self.known_duids = self._load_known_duids()
+        
+        # Setup email alerts if enabled
+        self.email_alerts_enabled = os.getenv('ENABLE_EMAIL_ALERTS', 'false').lower() == 'true'
+        self.email_sender = None
+        
+        if self.email_alerts_enabled:
+            try:
+                self.email_sender = EmailSender(
+                    smtp_server=os.getenv('SMTP_SERVER', 'smtp.mail.me.com'),
+                    smtp_port=int(os.getenv('SMTP_PORT', '587')),
+                    sender_email=os.getenv('ALERT_EMAIL', ''),
+                    sender_password=os.getenv('ALERT_PASSWORD', ''),
+                    recipient_email=os.getenv('RECIPIENT_EMAIL', '')
+                )
+                logger.info("Email alerts configured successfully")
+            except Exception as e:
+                logger.error(f"Failed to configure email alerts: {e}")
+                self.email_alerts_enabled = False
+        
         logger.info("Unified AEMO collector initialized")
+    
+    def _load_known_duids(self) -> Set[str]:
+        """Load known DUIDs from file"""
+        if self.known_duids_file.exists():
+            with open(self.known_duids_file, 'r') as f:
+                return set(line.strip() for line in f if line.strip())
+        return set()
+    
+    def _save_known_duids(self):
+        """Save known DUIDs to file"""
+        with open(self.known_duids_file, 'w') as f:
+            for duid in sorted(self.known_duids):
+                f.write(f"{duid}\n")
+    
+    def _check_new_duids(self, df: pd.DataFrame) -> List[str]:
+        """Check for new DUIDs in dataframe"""
+        if 'duid' not in df.columns:
+            return []
+        
+        current_duids = set(df['duid'].unique())
+        new_duids = current_duids - self.known_duids
+        
+        if new_duids:
+            # Update known DUIDs
+            self.known_duids.update(new_duids)
+            self._save_known_duids()
+            
+            # Send email alert
+            self._send_new_duid_alert(list(new_duids))
+        
+        return list(new_duids)
+    
+    def _send_new_duid_alert(self, new_duids: List[str]):
+        """Send email alert for new DUIDs"""
+        if not self.email_alerts_enabled or not self.email_sender:
+            return
+        
+        try:
+            alert = Alert(
+                title=f"New DUIDs Discovered: {len(new_duids)} new units",
+                message=f"The following new DUIDs have been discovered in the AEMO data:\n\n" + 
+                       "\n".join(f"  • {duid}" for duid in sorted(new_duids)),
+                severity=AlertSeverity.INFO,
+                source="UnifiedCollector",
+                metadata={
+                    "new_duids": new_duids,
+                    "total_known_duids": len(self.known_duids),
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+            
+            success = self.email_sender.send(alert)
+            if success:
+                logger.info(f"Email alert sent for {len(new_duids)} new DUIDs")
+            else:
+                logger.error("Failed to send new DUID email alert")
+                
+        except Exception as e:
+            logger.error(f"Error sending new DUID alert: {e}")
     
     def get_latest_files(self, url: str, pattern: str) -> List[str]:
         """Get latest files from a directory matching pattern"""
@@ -442,10 +532,10 @@ class UnifiedAEMOCollector:
                     )
                     intervals = scada5_df[mask]
                     
-                    # Calculate average: sum of available intervals / 2
+                    # Calculate average: mean of available intervals
                     if len(intervals) > 0:
-                        # Sum of intervals / 2 (regardless of how many intervals)
-                        avg_value = intervals['scadavalue'].sum() / 2.0
+                        # Mean of intervals (correct mathematical average)
+                        avg_value = intervals['scadavalue'].mean()
                         
                         aggregated_data.append({
                             'settlementdate': end_time,
@@ -616,6 +706,11 @@ class UnifiedAEMOCollector:
                 self.output_files['scada5'], 
                 ['settlementdate', 'duid']
             )
+            # Check for new DUIDs
+            if not scada5_df.empty:
+                new_duids = self._check_new_duids(scada5_df)
+                if new_duids:
+                    logger.info(f"Discovered {len(new_duids)} new DUIDs: {', '.join(new_duids[:5])}{'...' if len(new_duids) > 5 else ''}")
         except Exception as e:
             logger.error(f"Error collecting 5-min SCADA: {e}")
             results['scada5'] = False

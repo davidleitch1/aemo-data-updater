@@ -336,6 +336,19 @@ class GenerationCollector:
         """Alias for update_data to match expected interface"""
         return self.update_data()
     
+    def get_summary(self) -> Dict[str, Any]:
+        """Get collector summary for status reporting"""
+        try:
+            df = self.load_historical_data()
+            latest = df['settlementdate'].max() if len(df) > 0 else None
+            return {
+                'records': len(df),
+                'latest': latest.strftime('%Y-%m-%d %H:%M') if latest else 'No data',
+                'duids': df['duid'].nunique() if len(df) > 0 else 0
+            }
+        except Exception as e:
+            return {'error': str(e)}
+    
     def check_integrity(self) -> Dict[str, Any]:
         """Check data integrity"""
         df = self.load_historical_data()

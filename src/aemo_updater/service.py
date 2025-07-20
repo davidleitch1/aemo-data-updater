@@ -13,6 +13,7 @@ from .collectors.generation_collector import GenerationCollector
 from .collectors.transmission_collector import TransmissionCollector
 from .collectors.price_collector import PriceCollector
 from .collectors.rooftop_collector import RooftopCollector
+from .collectors.trading_collector import TradingCollector
 
 logger = get_logger(__name__)
 
@@ -35,7 +36,12 @@ class AemoDataService:
             logger.error(f"Failed to initialize generation collector: {e}")
             
         try:
-            self.collectors['transmission'] = TransmissionCollector()
+            # Transmission collector requires config parameter
+            transmission_config = {
+                'output_file': self.config.transmission_output_file,
+                'retention_days': 30,  # From PARQUET_FILES config
+            }
+            self.collectors['transmission'] = TransmissionCollector(transmission_config)
             logger.info("Transmission collector initialized")
         except Exception as e:
             logger.error(f"Failed to initialize transmission collector: {e}")
@@ -47,10 +53,21 @@ class AemoDataService:
             logger.error(f"Failed to initialize price collector: {e}")
             
         try:
-            self.collectors['rooftop'] = RooftopCollector()
+            # Rooftop collector requires config parameter
+            rooftop_config = {
+                'output_file': self.config.rooftop_solar_file,
+                'retention_days': 30,  # From PARQUET_FILES config
+            }
+            self.collectors['rooftop'] = RooftopCollector(rooftop_config)
             logger.info("Rooftop solar collector initialized")
         except Exception as e:
             logger.error(f"Failed to initialize rooftop collector: {e}")
+            
+        try:
+            self.collectors['trading'] = TradingCollector()
+            logger.info("Trading data collector initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize trading collector: {e}")
             
         logger.info(f"Service initialized with {len(self.collectors)} collectors")
         
@@ -80,7 +97,13 @@ class AemoDataService:
         logger.info(f"Results: {success_count}/{total_collectors} collectors updated")
         
         # Log individual results
-        status_symbols = {'generation': '🏭', 'transmission': '⚡', 'prices': '💰', 'rooftop': '☀️'}
+        status_symbols = {
+            'generation': '🏭', 
+            'transmission': '⚡', 
+            'prices': '💰', 
+            'rooftop': '☀️',
+            'trading': '📈'
+        }
         status_line = " | ".join([
             f"{status_symbols.get(name, '📊')} {name}: {'✓' if success else '○'}"
             for name, success in results.items()

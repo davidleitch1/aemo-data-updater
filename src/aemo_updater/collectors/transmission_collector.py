@@ -232,7 +232,20 @@ class TransmissionCollector(BaseCollector):
         
         # Merge with existing data
         if not existing_df.empty:
-            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            # Get date range of new data
+            new_min_date = new_df['settlementdate'].min()
+            new_max_date = new_df['settlementdate'].max()
+            
+            # Filter out existing data in the date range of new data
+            # This prevents keeping both old and new data for the same dates
+            existing_filtered = existing_df[
+                (existing_df['settlementdate'] < new_min_date) | 
+                (existing_df['settlementdate'] > new_max_date)
+            ]
+            
+            self.logger.info(f"Filtering existing data: removed {len(existing_df) - len(existing_filtered)} records in date range {new_min_date} to {new_max_date}")
+            
+            combined_df = pd.concat([existing_filtered, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(
                 subset=self.get_unique_columns(),
                 keep='last'

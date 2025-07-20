@@ -92,14 +92,14 @@ def recalculate_scada30_efficient():
             if window_data.empty:
                 continue
             
-            # Group by DUID and calculate sum/2 for whatever intervals are available
+            # Group by DUID and calculate mean for whatever intervals are available
             grouped = window_data.groupby('duid')
             
             duids_processed = 0
             
             for duid, group in grouped:
-                # Calculate: sum of available intervals / 2
-                avg_value = group['scadavalue'].sum() / 2.0
+                # Calculate: mean of available intervals (correct mathematical average)
+                avg_value = group['scadavalue'].mean()
                 
                 batch_results.append({
                     'settlementdate': end_time,

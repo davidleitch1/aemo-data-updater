@@ -234,8 +234,31 @@ class BaseCollector(ABC):
                 # Identify unique columns for deduplication
                 unique_cols = self.get_unique_columns()
                 
-                # Combine and deduplicate
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                # If settlementdate exists, filter out overlapping date ranges
+                # This prevents keeping both old and new data for the same time periods
+                if 'settlementdate' in new_df.columns and 'settlementdate' in existing_df.columns:
+                    # Get date range of new data
+                    new_min_date = new_df['settlementdate'].min()
+                    new_max_date = new_df['settlementdate'].max()
+                    
+                    # Filter out existing data in the date range of new data
+                    existing_filtered = existing_df[
+                        (existing_df['settlementdate'] < new_min_date) | 
+                        (existing_df['settlementdate'] > new_max_date)
+                    ]
+                    
+                    self.logger.debug(
+                        f"Filtering existing data: removed {len(existing_df) - len(existing_filtered)} "
+                        f"records in date range {new_min_date} to {new_max_date}"
+                    )
+                    
+                    # Combine filtered existing with new data
+                    combined_df = pd.concat([existing_filtered, new_df], ignore_index=True)
+                else:
+                    # No settlementdate column, use original logic
+                    combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                
+                # Remove duplicates based on unique columns
                 original_len = len(combined_df)
                 combined_df = combined_df.drop_duplicates(subset=unique_cols, keep='last')
                 duplicates = original_len - len(combined_df)

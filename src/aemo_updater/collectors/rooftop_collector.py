@@ -14,7 +14,7 @@ import zipfile
 from io import BytesIO
 
 from .base_collector import BaseCollector
-from ..config import NEMWEB_URLS, HTTP_HEADERS, REQUEST_TIMEOUT
+from ..config import NEMWEB_URLS, HTTP_HEADERS, REQUEST_TIMEOUT, DATA_PATH
 
 
 class RooftopCollector(BaseCollector):
@@ -25,6 +25,9 @@ class RooftopCollector(BaseCollector):
         self.current_url = NEMWEB_URLS['rooftop']['current']
         self.archive_url = NEMWEB_URLS['rooftop']['archive']
         self.file_pattern = re.compile(NEMWEB_URLS['rooftop']['file_pattern'])
+        
+        # Path for the 30-minute data file
+        self.rooftop_30_path = DATA_PATH / 'rooftop_30.parquet'
         
         # Track last processed file to avoid reprocessing
         self.last_processed_file = None
@@ -111,7 +114,10 @@ class RooftopCollector(BaseCollector):
                 
             self.logger.info(f"Extracted {len(df_30min)} 30-minute records from {filename}")
             
-            # Convert to 5-minute intervals
+            # Save the 30-minute data to separate file
+            self._save_30min_data(df_30min, filename)
+            
+            # Convert to 5-minute intervals for dashboard
             df_5min = self._convert_30min_to_5min(df_30min)
             
             # Add source file info
@@ -124,6 +130,51 @@ class RooftopCollector(BaseCollector):
             self.logger.error(f"Error parsing rooftop data: {e}")
             return pd.DataFrame()
             
+    def _save_30min_data(self, df_30min: pd.DataFrame, source_file: str):
+        """Save 30-minute data to separate parquet file"""
+        try:
+            # Convert from pivot format back to long format for storage
+            df_long = df_30min.melt(
+                id_vars=['settlementdate'],
+                var_name='REGIONID',
+                value_name='POWER'
+            )
+            
+            # Add metadata
+            df_long['INTERVAL_DATETIME'] = df_long['settlementdate']
+            df_long['QI'] = '1'  # Quality indicator
+            df_long['TYPE'] = 'MEASUREMENT'
+            df_long['source_file'] = source_file
+            
+            # Select and order columns to match historical format
+            df_long = df_long[['INTERVAL_DATETIME', 'REGIONID', 'POWER', 'QI', 'TYPE', 'source_file']]
+            
+            # Load existing data if file exists
+            if self.rooftop_30_path.exists():
+                try:
+                    existing_df = pd.read_parquet(self.rooftop_30_path)
+                    # Combine with new data
+                    combined_df = pd.concat([existing_df, df_long], ignore_index=True)
+                    # Remove duplicates, keeping the latest
+                    combined_df = combined_df.drop_duplicates(
+                        subset=['INTERVAL_DATETIME', 'REGIONID'],
+                        keep='last'
+                    )
+                    # Sort by datetime
+                    combined_df = combined_df.sort_values(['INTERVAL_DATETIME', 'REGIONID'])
+                except Exception as e:
+                    self.logger.warning(f"Could not read existing 30min file: {e}")
+                    combined_df = df_long
+            else:
+                combined_df = df_long
+            
+            # Save to parquet
+            combined_df.to_parquet(self.rooftop_30_path, engine='pyarrow', compression='snappy')
+            self.logger.info(f"Saved {len(df_long)} 30-minute records to {self.rooftop_30_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving 30-minute data: {e}")
+    
     def _extract_30min_data(self, zip_content: bytes) -> pd.DataFrame:
         """Extract 30-minute data from ZIP file"""
         try:

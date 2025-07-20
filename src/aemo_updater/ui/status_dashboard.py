@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional
 import logging
 
 from ..config import PARQUET_FILES, STATUS_UI_PORT, STATUS_UI_HOST, QUALITY_THRESHOLDS, get_config
-from ..service import UpdaterService
+from ..service import AemoDataService
 from ..integrity import DataIntegrityChecker
 from ..alerts import AlertManager, Alert, AlertSeverity, AlertChannel
 
@@ -48,7 +48,7 @@ class StatusDashboard(param.Parameterized):
     
     def __init__(self, **params):
         super().__init__(**params)
-        self.service = UpdaterService()
+        self.service = AemoDataService()
         self.integrity_checker = DataIntegrityChecker()
         
         # Initialize alert manager
