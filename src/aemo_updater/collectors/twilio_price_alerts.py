@@ -31,9 +31,9 @@ HIGH_THRESHOLD = 1000.0    # Send alert when price goes above this
 LOW_THRESHOLD = 300.0      # Send alert when price goes back below this
 EXTREME_THRESHOLD = 10000.0  # Use alarm emoji for prices above this
 
-# Alert state tracking file - use Path.home() for cross-machine compatibility
+# Alert state tracking file - use environment variable or production default
 from pathlib import Path
-ALERT_STATE_FILE = Path.home() / 'Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/price_alert_state.pkl'
+ALERT_STATE_FILE = Path(os.getenv('PRICE_ALERT_STATE_FILE', '/Users/davidleitch/aemo_production/data/price_alert_state.pkl'))
 
 
 def initialize_twilio_client():

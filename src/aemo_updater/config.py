@@ -50,6 +50,12 @@ PARQUET_FILES = {
         'update_interval': 1800,  # 30 minutes
         'retention_days': 30,
     },
+    'curtailment': {
+        'path': DATA_PATH / 'aemo-energy-dashboard' / 'data' / 'curtailment5.parquet',
+        'description': 'Wind/solar curtailment data',
+        'update_interval': 300,  # 5 minutes
+        'retention_days': 365,  # Keep 1 year for analysis
+    },
 }
 
 # NEMWEB URLs
@@ -84,9 +90,10 @@ RETRY_DELAY = 10  # seconds
 REQUEST_TIMEOUT = 60  # seconds
 
 # HTTP headers (required for NEMWEB)
+# Use browser user-agent to avoid 406 errors
 HTTP_HEADERS = {
-    'User-Agent': 'AEMO Dashboard Data Collector',
-    'Accept': 'application/zip, text/html',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/zip,*/*;q=0.8',
 }
 
 # Logging configuration

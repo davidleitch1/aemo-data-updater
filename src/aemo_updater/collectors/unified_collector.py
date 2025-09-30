@@ -36,14 +36,15 @@ class UnifiedAEMOCollector:
         self.config = config or {}
         
         # Base paths
-        self.base_path = Path("/Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot")
-        self.data_path = self.base_path / "aemo-data-updater" / "data 2"
+        
+        self.data_path = Path(os.getenv('AEMO_DATA_PATH', '/Users/davidleitch/aemo_production/data'))
         
         # Output files
         self.output_files = {
             'prices5': self.data_path / 'prices5.parquet',
             'scada5': self.data_path / 'scada5.parquet',
             'transmission5': self.data_path / 'transmission5.parquet',
+            'curtailment5': self.data_path / 'curtailment5.parquet',
             'prices30': self.data_path / 'prices30.parquet',
             'scada30': self.data_path / 'scada30.parquet',
             'transmission30': self.data_path / 'transmission30.parquet',
@@ -52,11 +53,12 @@ class UnifiedAEMOCollector:
         
         # URLs for current data
         self.current_urls = {
-            'prices5': 'http://nemweb.com.au/Reports/Current/DispatchIS_Reports/',
-            'scada5': 'http://nemweb.com.au/Reports/Current/Dispatch_SCADA/',
-            'transmission5': 'http://nemweb.com.au/Reports/Current/DispatchIS_Reports/',
-            'trading': 'http://nemweb.com.au/Reports/Current/TradingIS_Reports/',
-            'rooftop': 'http://nemweb.com.au/Reports/Current/ROOFTOP_PV/ACTUAL/',
+            'prices5': 'http://nemweb.com.au/Reports/CURRENT/DispatchIS_Reports/',
+            'scada5': 'http://nemweb.com.au/Reports/CURRENT/Dispatch_SCADA/',
+            'transmission5': 'http://nemweb.com.au/Reports/CURRENT/DispatchIS_Reports/',
+            'curtailment5': 'https://www.nemweb.com.au/Reports/Current/Next_Day_Dispatch/',
+            'trading': 'http://nemweb.com.au/Reports/CURRENT/TradingIS_Reports/',
+            'rooftop': 'http://nemweb.com.au/Reports/CURRENT/ROOFTOP_PV/ACTUAL/',
         }
         
         # Headers for requests
@@ -67,6 +69,7 @@ class UnifiedAEMOCollector:
             'prices5': set(),
             'scada5': set(),
             'transmission5': set(),
+            'curtailment5': set(),
             'trading': set(),
             'rooftop': set(),
         }
@@ -317,7 +320,6 @@ class UnifiedAEMOCollector:
                     
                     # Filter out invalid values
                     scada_df = scada_df[scada_df['scadavalue'].notna()]
-                    scada_df = scada_df[scada_df['scadavalue'] >= 0]
                     
                     if not scada_df.empty:
                         all_data.append(scada_df)
@@ -381,9 +383,111 @@ class UnifiedAEMOCollector:
             return combined_df
         
         return pd.DataFrame()
-    
+
+    def collect_5min_curtailment(self) -> pd.DataFrame:
+        """Collect 5-minute curtailment data from Next Day Dispatch files"""
+        import re
+
+        url = self.current_urls['curtailment5']
+        files = self.get_latest_files(url, 'PUBLIC_NEXT_DAY_DISPATCH_')
+
+        # Get only new files
+        new_files = [f for f in files if f not in self.last_files['curtailment5']]
+
+        if not new_files:
+            logger.debug("No new curtailment files found")
+            return pd.DataFrame()
+
+        logger.info(f"Found {len(new_files)} new curtailment files")
+
+        # Wind/solar DUID pattern
+        wind_solar_pattern = re.compile(r'(WF|SF|SOLAR|WIND|PV)', re.IGNORECASE)
+
+        all_data = []
+        for filename in new_files[-5:]:  # Process last 5 files
+            try:
+                file_url = f"{url}{filename}"
+                response = requests.get(file_url, headers=self.headers, timeout=60)
+                response.raise_for_status()
+
+                # Process ZIP file - extract UNIT_SOLUTION data
+                with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                    csv_files = [f for f in z.namelist() if f.endswith('.csv') or f.endswith('.CSV')]
+
+                    if csv_files:
+                        csv_content = z.read(csv_files[0]).decode('utf-8', errors='ignore')
+
+                        # Parse line by line for UNIT_SOLUTION records
+                        for line in csv_content.split('\n'):
+                            if not line.startswith('D,DISPATCH,UNIT_SOLUTION'):
+                                continue
+
+                            parts = line.split(',')
+                            if len(parts) <= 60:
+                                continue
+
+                            duid = parts[6].strip('"')
+
+                            # Filter to wind/solar units only
+                            if not wind_solar_pattern.search(duid):
+                                continue
+
+                            try:
+                                settlementdate = parts[4].strip('"')
+                                totalcleared = float(parts[14]) if parts[14] else 0.0
+                                availability = float(parts[36]) if parts[36] else 0.0
+                                semidispatchcap = int(parts[59]) if parts[59] else 0
+
+                                # Calculate curtailment with solar night filter
+                                curtailment = 0.0
+                                if semidispatchcap == 1:
+                                    # For solar, only calculate when availability > 1 MW
+                                    if 'SF' in duid or 'SOLAR' in duid.upper():
+                                        if availability > 1.0:
+                                            curtailment = max(0.0, availability - totalcleared)
+                                    else:
+                                        # For wind, always calculate when semidispatchcap = 1
+                                        curtailment = max(0.0, availability - totalcleared)
+
+                                all_data.append({
+                                    'settlementdate': settlementdate,
+                                    'duid': duid,
+                                    'availability': availability,
+                                    'totalcleared': totalcleared,
+                                    'semidispatchcap': semidispatchcap,
+                                    'curtailment': curtailment
+                                })
+                            except (ValueError, IndexError):
+                                continue
+
+            except Exception as e:
+                logger.error(f"Error processing curtailment file {filename}: {e}")
+                continue
+
+        # Update last files
+        self.last_files['curtailment5'].update(new_files)
+
+        if all_data:
+            curtail_df = pd.DataFrame(all_data)
+            curtail_df['settlementdate'] = pd.to_datetime(curtail_df['settlementdate'], format='%Y/%m/%d %H:%M:%S')
+            curtail_df = curtail_df.drop_duplicates(subset=['settlementdate', 'duid'])
+            curtail_df = curtail_df.sort_values(['settlementdate', 'duid'])
+
+            total_curtailment = curtail_df['curtailment'].sum()
+            logger.info(f"Collected {len(curtail_df)} curtailment records, total: {total_curtailment:.1f} MW")
+            return curtail_df
+
+        return pd.DataFrame()
+
     def collect_30min_trading(self) -> Dict[str, pd.DataFrame]:
-        """Collect 30-minute trading data (prices and transmission)"""
+        """
+        Collect 30-minute trading data (prices and transmission) by properly
+        aggregating 6 x 5-minute intervals for each 30-minute period.
+        
+        AEMO convention: timestamps represent the END of the interval.
+        - 12:30:00 = average of 12:05, 12:10, 12:15, 12:20, 12:25, 12:30
+        """
+        # First, collect all 5-minute price and transmission data
         url = self.current_urls['trading']
         files = self.get_latest_files(url, 'PUBLIC_TRADINGIS_')
         
@@ -396,20 +500,12 @@ class UnifiedAEMOCollector:
         
         logger.info(f"Found {len(new_files)} new trading files")
         
-        # Process every 6th file for 30-minute intervals
-        trading_files = []
-        for i, filename in enumerate(sorted(new_files)):
-            if i % 6 == 0:  # Every 6th file = 30-minute intervals
-                trading_files.append(filename)
+        # Collect ALL 5-minute data (not just every 6th file!)
+        price_5min_data = []
+        transmission_5min_data = []
         
-        if not trading_files:
-            logger.debug("No 30-minute trading files to process")
-            return {'prices30': pd.DataFrame(), 'transmission30': pd.DataFrame()}
-        
-        price_data = []
-        transmission_data = []
-        
-        for filename in trading_files[-10:]:  # Process last 10 files
+        # Process last 20 files to get enough data for aggregation
+        for filename in new_files[-20:]:
             # Get price data
             price_df = self.download_and_parse_file(url, filename, 'PRICE')
             if not price_df.empty and 'SETTLEMENTDATE' in price_df.columns:
@@ -427,7 +523,7 @@ class UnifiedAEMOCollector:
                     clean_price_df = clean_price_df[clean_price_df['regionid'].isin(main_regions)]
                     
                     if not clean_price_df.empty:
-                        price_data.append(clean_price_df)
+                        price_5min_data.append(clean_price_df)
             
             # Get transmission data
             trans_df = self.download_and_parse_file(url, filename, 'INTERCONNECTORRES')
@@ -442,29 +538,127 @@ class UnifiedAEMOCollector:
                     clean_trans_df['interconnectorid'] = trans_df['INTERCONNECTORID'].str.strip()
                     clean_trans_df['meteredmwflow'] = pd.to_numeric(trans_df['METEREDMWFLOW'], errors='coerce')
                     
+                    # Also get MWFLOW if available
+                    if 'MWFLOW' in trans_df.columns:
+                        clean_trans_df['mwflow'] = pd.to_numeric(trans_df['MWFLOW'], errors='coerce')
+                    
                     clean_trans_df = clean_trans_df[clean_trans_df['meteredmwflow'].notna()]
                     
                     if not clean_trans_df.empty:
-                        transmission_data.append(clean_trans_df)
+                        transmission_5min_data.append(clean_trans_df)
         
         # Update last files
         self.last_files['trading'].update(new_files)
         
         result = {'prices30': pd.DataFrame(), 'transmission30': pd.DataFrame()}
         
-        if price_data:
-            combined_prices = pd.concat(price_data, ignore_index=True)
-            combined_prices = combined_prices.drop_duplicates(subset=['settlementdate', 'regionid'])
-            combined_prices = combined_prices.sort_values(['settlementdate', 'regionid'])
-            result['prices30'] = combined_prices
-            logger.info(f"Collected {len(combined_prices)} new 30-min price records")
+        # Aggregate 5-minute prices to 30-minute
+        if price_5min_data:
+            logger.info("Aggregating 5-minute prices to 30-minute intervals...")
+            combined_5min_prices = pd.concat(price_5min_data, ignore_index=True)
+            combined_5min_prices = combined_5min_prices.drop_duplicates(subset=['settlementdate', 'regionid'])
+            combined_5min_prices = combined_5min_prices.sort_values(['settlementdate', 'regionid'])
+            
+            # Generate 30-minute endpoints
+            min_time = combined_5min_prices['settlementdate'].min()
+            max_time = combined_5min_prices['settlementdate'].max()
+            
+            # Round to next 30-minute boundary
+            first_30min = min_time.ceil('30min')
+            if first_30min.minute not in [0, 30]:
+                if first_30min.minute < 30:
+                    first_30min = first_30min.replace(minute=30)
+                else:
+                    first_30min = first_30min.replace(minute=0) + pd.Timedelta(hours=1)
+            
+            endpoints = pd.date_range(start=first_30min, end=max_time, freq='30min')
+            
+            # Aggregate for each 30-minute endpoint
+            price_30min_records = []
+            for endpoint in endpoints:
+                # Define the 30-minute window ending at this endpoint
+                window_start = endpoint - pd.Timedelta(minutes=30)
+                
+                # Get all 5-minute prices in this window (exclusive of start, inclusive of end)
+                window_data = combined_5min_prices[
+                    (combined_5min_prices['settlementdate'] > window_start) & 
+                    (combined_5min_prices['settlementdate'] <= endpoint)
+                ]
+                
+                # Calculate average price for each region
+                for region in ['NSW1', 'QLD1', 'SA1', 'TAS1', 'VIC1']:
+                    region_data = window_data[window_data['regionid'] == region]
+                    
+                    if len(region_data) > 0:
+                        # Calculate average price (should be 6 intervals)
+                        avg_price = region_data['rrp'].mean()
+                        
+                        price_30min_records.append({
+                            'settlementdate': endpoint,
+                            'regionid': region,
+                            'rrp': avg_price
+                        })
+            
+            if price_30min_records:
+                result['prices30'] = pd.DataFrame(price_30min_records)
+                logger.info(f"Aggregated to {len(result['prices30'])} 30-min price records")
         
-        if transmission_data:
-            combined_trans = pd.concat(transmission_data, ignore_index=True)
-            combined_trans = combined_trans.drop_duplicates(subset=['settlementdate', 'interconnectorid'])
-            combined_trans = combined_trans.sort_values(['settlementdate', 'interconnectorid'])
-            result['transmission30'] = combined_trans
-            logger.info(f"Collected {len(combined_trans)} new 30-min transmission records")
+        # Aggregate 5-minute transmission to 30-minute
+        if transmission_5min_data:
+            logger.info("Aggregating 5-minute transmission to 30-minute intervals...")
+            combined_5min_trans = pd.concat(transmission_5min_data, ignore_index=True)
+            combined_5min_trans = combined_5min_trans.drop_duplicates(subset=['settlementdate', 'interconnectorid'])
+            combined_5min_trans = combined_5min_trans.sort_values(['settlementdate', 'interconnectorid'])
+            
+            # Generate 30-minute endpoints
+            min_time = combined_5min_trans['settlementdate'].min()
+            max_time = combined_5min_trans['settlementdate'].max()
+            
+            # Round to next 30-minute boundary
+            first_30min = min_time.ceil('30min')
+            if first_30min.minute not in [0, 30]:
+                if first_30min.minute < 30:
+                    first_30min = first_30min.replace(minute=30)
+                else:
+                    first_30min = first_30min.replace(minute=0) + pd.Timedelta(hours=1)
+            
+            endpoints = pd.date_range(start=first_30min, end=max_time, freq='30min')
+            
+            # Get unique interconnectors
+            interconnectors = combined_5min_trans['interconnectorid'].unique()
+            
+            # Aggregate for each 30-minute endpoint
+            trans_30min_records = []
+            for endpoint in endpoints:
+                # Define the 30-minute window ending at this endpoint
+                window_start = endpoint - pd.Timedelta(minutes=30)
+                
+                # Get all 5-minute transmission in this window
+                window_data = combined_5min_trans[
+                    (combined_5min_trans['settlementdate'] > window_start) & 
+                    (combined_5min_trans['settlementdate'] <= endpoint)
+                ]
+                
+                # Calculate average flow for each interconnector
+                for interconnector in interconnectors:
+                    ic_data = window_data[window_data['interconnectorid'] == interconnector]
+                    
+                    if len(ic_data) > 0:
+                        # Calculate average flows
+                        record = {
+                            'settlementdate': endpoint,
+                            'interconnectorid': interconnector,
+                            'meteredmwflow': ic_data['meteredmwflow'].mean()
+                        }
+                        
+                        if 'mwflow' in ic_data.columns:
+                            record['mwflow'] = ic_data['mwflow'].mean()
+                        
+                        trans_30min_records.append(record)
+            
+            if trans_30min_records:
+                result['transmission30'] = pd.DataFrame(trans_30min_records)
+                logger.info(f"Aggregated to {len(result['transmission30'])} 30-min transmission records")
         
         return result
     
@@ -513,7 +707,7 @@ class UnifiedAEMOCollector:
             
             for end_time in sorted(endpoints):
                 end_time = pd.Timestamp(end_time)
-                start_time = end_time - pd.Timedelta(minutes=25)
+                start_time = end_time - pd.Timedelta(minutes=30)
                 
                 # Get all DUIDs that have data at this endpoint
                 endpoint_duids = data_to_process[
@@ -719,14 +913,26 @@ class UnifiedAEMOCollector:
         try:
             transmission5_df = self.collect_5min_transmission()
             results['transmission5'] = self.merge_and_save(
-                transmission5_df, 
-                self.output_files['transmission5'], 
+                transmission5_df,
+                self.output_files['transmission5'],
                 ['settlementdate', 'interconnectorid']
             )
         except Exception as e:
             logger.error(f"Error collecting 5-min transmission: {e}")
             results['transmission5'] = False
-        
+
+        # Collect 5-minute curtailment
+        try:
+            curtailment5_df = self.collect_5min_curtailment()
+            results['curtailment5'] = self.merge_and_save(
+                curtailment5_df,
+                self.output_files['curtailment5'],
+                ['settlementdate', 'duid']
+            )
+        except Exception as e:
+            logger.error(f"Error collecting 5-min curtailment: {e}")
+            results['curtailment5'] = False
+
         # Collect 30-minute data (every cycle)
         self.cycle_count += 1
         logger.info("Collecting 30-minute data...")

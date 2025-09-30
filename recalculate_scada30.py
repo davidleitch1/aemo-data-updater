@@ -79,7 +79,7 @@ def recalculate_scada30_efficient():
         
         for end_time in batch_endpoints:
             end_time = pd.Timestamp(end_time)
-            start_time = end_time - pd.Timedelta(minutes=25)
+            start_time = end_time - pd.Timedelta(minutes=30)
             
             # Get all data for this 30-minute window
             # Use the full scada5 dataset for complete intervals

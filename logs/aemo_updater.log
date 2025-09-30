@@ -170,3 +170,48 @@
 2025-07-14 13:48:49,157 - GenerationCollector - INFO -   Total MW: 21399.6
 2025-07-14 13:48:49,556 - GenerationCollector - INFO - Saved 3356805 records to /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/genhist/gen_output.parquet (14.71 MB)
 2025-07-14 13:48:49,557 - GenerationCollector - INFO - Added 471 new records. Total: 3356805
+2025-09-30 11:33:26,098 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:33:26,099 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:33:26,175 - CurtailmentCollector - WARNING - No dispatch ZIP files found
+2025-09-30 11:33:26,175 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:33:26,234 - CurtailmentCollector - WARNING - No dispatch ZIP files found
+2025-09-30 11:33:26,234 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:33:26,290 - CurtailmentCollector - WARNING - No dispatch ZIP files found
+2025-09-30 11:33:50,006 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:33:50,007 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:33:50,221 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:33:50,222 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:33:50,552 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:33:50,693 - CurtailmentCollector - WARNING - HTTP 406 for http://nemweb.com.au/Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:34:00,716 - CurtailmentCollector - WARNING - HTTP 406 for http://nemweb.com.au/Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:34:10,740 - CurtailmentCollector - WARNING - HTTP 406 for http://nemweb.com.au/Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:34:10,740 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:34:10,797 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:34:10,816 - CurtailmentCollector - WARNING - HTTP 406 for http://nemweb.com.au/Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:34:20,839 - CurtailmentCollector - WARNING - HTTP 406 for http://nemweb.com.au/Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:34:30,862 - CurtailmentCollector - WARNING - HTTP 406 for http://nemweb.com.au/Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:34:30,862 - CurtailmentCollector - ERROR - Error extracting ZIP: File is not a zip file
+2025-09-30 11:35:03,355 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:35:03,356 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:35:03,426 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:35:03,426 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:35:03,485 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:35:03,514 - CurtailmentCollector - WARNING - No valid UNIT_SOLUTION records extracted
+2025-09-30 11:35:03,515 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:35:03,572 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/DispatchIS_Reports/PUBLIC_DISPATCHIS_202509301135_0000000482822358.zip
+2025-09-30 11:35:03,601 - CurtailmentCollector - WARNING - No valid UNIT_SOLUTION records extracted
+2025-09-30 11:36:25,309 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:36:25,311 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:36:25,612 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/Next_Day_Dispatch/PUBLIC_NEXT_DAY_DISPATCH_20250929_0000000482778442.zip
+2025-09-30 11:36:25,612 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:36:25,682 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/Next_Day_Dispatch/PUBLIC_NEXT_DAY_DISPATCH_20250929_0000000482778442.zip
+2025-09-30 11:36:26,512 - CurtailmentCollector - INFO - Extracted 44976 curtailment records from PUBLIC_NEXT_DAY_DISPATCH_20250929_0000000482778442.zip
+2025-09-30 11:36:26,513 - CurtailmentCollector - INFO -   Settlement time: 2025-09-29 04:05:00
+2025-09-30 11:36:26,514 - CurtailmentCollector - INFO -   Unique DUIDs: 157
+2025-09-30 11:36:26,515 - CurtailmentCollector - INFO -   Total curtailment: 382797.4 MW
+2025-09-30 11:36:26,522 - CurtailmentCollector - INFO - Curtailment collector initialized - output: /Users/davidleitch/Library/Mobile Documents/com~apple~CloudDocs/snakeplay/AEMO_spot/aemo-energy-dashboard/data/curtailment5.parquet
+2025-09-30 11:36:26,592 - CurtailmentCollector - INFO - Found latest dispatch file: /Reports/Current/Next_Day_Dispatch/PUBLIC_NEXT_DAY_DISPATCH_20250929_0000000482778442.zip
+2025-09-30 11:36:27,350 - CurtailmentCollector - INFO - Extracted 44976 curtailment records from PUBLIC_NEXT_DAY_DISPATCH_20250929_0000000482778442.zip
+2025-09-30 11:36:27,350 - CurtailmentCollector - INFO -   Settlement time: 2025-09-29 04:05:00
+2025-09-30 11:36:27,351 - CurtailmentCollector - INFO -   Unique DUIDs: 157
+2025-09-30 11:36:27,351 - CurtailmentCollector - INFO -   Total curtailment: 382797.4 MW
