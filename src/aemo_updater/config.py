@@ -54,7 +54,7 @@ PARQUET_FILES = {
         'path': DATA_PATH / 'aemo-energy-dashboard' / 'data' / 'curtailment5.parquet',
         'description': 'Wind/solar curtailment data',
         'update_interval': 300,  # 5 minutes
-        'retention_days': 365,  # Keep 1 year for analysis
+        'retention_days': 3650,  # Keep 10 years (effectively all data for long-term analysis)
     },
 }
 
