@@ -61,11 +61,11 @@ class BaseCollector(ABC):
         
     async def download_file(self, url: str) -> Optional[bytes]:
         """
-        Download file from URL with retries
-        
+        Download file from URL with retries and exponential backoff
+
         Args:
             url: URL to download
-            
+
         Returns:
             File content as bytes or None if failed
         """
@@ -73,7 +73,7 @@ class BaseCollector(ABC):
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
-                        url, 
+                        url,
                         headers=HTTP_HEADERS,
                         timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
                     ) as response:
@@ -81,17 +81,29 @@ class BaseCollector(ABC):
                             content = await response.read()
                             self.logger.debug(f"Downloaded {len(content)} bytes from {url}")
                             return content
+                        elif response.status == 429:
+                            # Rate limited - use longer backoff
+                            self.logger.warning(f"Rate limited (429) for {url}")
+                        elif response.status >= 500:
+                            # Server error - retry with backoff
+                            self.logger.warning(f"Server error HTTP {response.status} for {url}")
                         else:
+                            # Client error (4xx except 429) - don't retry
                             self.logger.warning(f"HTTP {response.status} for {url}")
-                            
+                            if response.status == 404:
+                                return None  # File not found, don't retry
+
             except asyncio.TimeoutError:
                 self.logger.warning(f"Timeout downloading {url} (attempt {attempt + 1}/{MAX_RETRIES})")
             except Exception as e:
                 self.logger.error(f"Error downloading {url}: {e}")
-                
+
             if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAY)
-                
+                # Exponential backoff: 10s, 20s, 40s...
+                backoff_delay = RETRY_DELAY * (2 ** attempt)
+                self.logger.debug(f"Waiting {backoff_delay}s before retry...")
+                await asyncio.sleep(backoff_delay)
+
         return None
         
     def extract_zip_content(self, zip_content: bytes) -> Optional[str]:
