@@ -56,6 +56,12 @@ PARQUET_FILES = {
         'update_interval': 300,  # 5 minutes
         'retention_days': 3650,  # Keep 10 years (effectively all data for long-term analysis)
     },
+    'demand': {
+        'path': DATA_PATH / 'aemo-energy-dashboard' / 'data' / 'demand30.parquet',
+        'description': 'Operational demand data (30-minute intervals)',
+        'update_interval': 1800,  # 30 minutes
+        'retention_days': 3650,  # Keep 10 years for long-term analysis
+    },
 }
 
 # NEMWEB URLs
@@ -80,6 +86,11 @@ NEMWEB_URLS = {
         'current': 'http://nemweb.com.au/Reports/Current/ROOFTOP_PV/ACTUAL/',
         'archive': 'http://nemweb.com.au/Reports/Archive/ROOFTOP_PV/ACTUAL/',
         'file_pattern': r'PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_\d+_\w+\.zip',
+    },
+    'demand': {
+        'current': 'http://nemweb.com.au/Reports/Current/Operational_Demand/ACTUAL_HH/',
+        'archive': 'http://nemweb.com.au/Reports/Archive/Operational_Demand/ACTUAL_HH/',
+        'file_pattern': r'PUBLIC_ACTUAL_OPERATIONAL_DEMAND_HH_\d+_\d+\.zip',
     },
 }
 

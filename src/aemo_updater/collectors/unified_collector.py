@@ -34,10 +34,12 @@ class UnifiedAEMOCollector:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """Initialize the unified collector"""
         self.config = config or {}
-        
-        # Base paths
-        
-        self.data_path = Path(os.getenv('AEMO_DATA_PATH', '/Users/davidleitch/aemo_production/data'))
+
+        # Base paths - use config if provided, otherwise use environment variable
+        if 'data_path' in self.config:
+            self.data_path = Path(self.config['data_path'])
+        else:
+            self.data_path = Path(os.getenv('AEMO_DATA_PATH', '/Users/davidleitch/aemo_production/data'))
         
         # Output files
         self.output_files = {
@@ -45,10 +47,13 @@ class UnifiedAEMOCollector:
             'scada5': self.data_path / 'scada5.parquet',
             'transmission5': self.data_path / 'transmission5.parquet',
             'curtailment5': self.data_path / 'curtailment5.parquet',
+            'curtailment_regional5': self.data_path / 'curtailment_regional5.parquet',
+            'curtailment_duid5': self.data_path / 'curtailment_duid5.parquet',
             'prices30': self.data_path / 'prices30.parquet',
             'scada30': self.data_path / 'scada30.parquet',
             'transmission30': self.data_path / 'transmission30.parquet',
             'rooftop30': self.data_path / 'rooftop30.parquet',
+            'demand30': self.data_path / 'demand30.parquet',
         }
         
         # URLs for current data
@@ -59,6 +64,7 @@ class UnifiedAEMOCollector:
             'curtailment5': 'https://www.nemweb.com.au/Reports/Current/Next_Day_Dispatch/',
             'trading': 'http://nemweb.com.au/Reports/CURRENT/TradingIS_Reports/',
             'rooftop': 'http://nemweb.com.au/Reports/CURRENT/ROOFTOP_PV/ACTUAL/',
+            'demand': 'http://nemweb.com.au/Reports/Current/Operational_Demand/ACTUAL_HH/',
         }
         
         # Headers for requests
@@ -70,8 +76,11 @@ class UnifiedAEMOCollector:
             'scada5': set(),
             'transmission5': set(),
             'curtailment5': set(),
+            'curtailment_regional5': set(),
+            'curtailment_duid5': set(),
             'trading': set(),
             'rooftop': set(),
+            'demand': set(),
         }
         
         # Collect all data types every cycle (no frequency limiting)
@@ -479,6 +488,183 @@ class UnifiedAEMOCollector:
 
         return pd.DataFrame()
 
+    def collect_5min_regional_curtailment(self) -> pd.DataFrame:
+        """
+        Collect 5-minute regional curtailment data from DISPATCHREGIONSUM table.
+
+        Uses AEMO's official UIGF (Unconstrained Intermittent Generation Forecast) data
+        to calculate curtailment as: curtailment = UIGF - CLEAREDMW
+
+        Schema:
+            settlementdate, regionid, solar_uigf, solar_cleared, solar_curtailment,
+            wind_uigf, wind_cleared, wind_curtailment, total_curtailment
+        """
+        url = self.current_urls['prices5']  # Same source as prices - DispatchIS_Reports
+        files = self.get_latest_files(url, 'PUBLIC_DISPATCHIS_')
+
+        # Get only new files
+        new_files = [f for f in files if f not in self.last_files['curtailment_regional5']]
+
+        if not new_files:
+            logger.debug("No new regional curtailment files found")
+            return pd.DataFrame()
+
+        logger.info(f"Found {len(new_files)} new files for regional curtailment")
+
+        all_data = []
+        for filename in new_files[-5:]:  # Process last 5 files
+            df = self.download_and_parse_file(url, filename, 'REGIONSUM')
+
+            if not df.empty and 'SETTLEMENTDATE' in df.columns:
+                # Extract regional curtailment data
+                curtail_df = pd.DataFrame()
+                curtail_df['settlementdate'] = pd.to_datetime(
+                    df['SETTLEMENTDATE'].str.strip('"'),
+                    format='%Y/%m/%d %H:%M:%S'
+                )
+
+                if 'REGIONID' in df.columns:
+                    curtail_df['regionid'] = df['REGIONID'].str.strip()
+
+                    # Extract UIGF and cleared values
+                    # Solar
+                    if 'SS_SOLAR_UIGF' in df.columns:
+                        curtail_df['solar_uigf'] = pd.to_numeric(df['SS_SOLAR_UIGF'], errors='coerce').fillna(0)
+                    else:
+                        curtail_df['solar_uigf'] = 0.0
+
+                    if 'SS_SOLAR_CLEAREDMW' in df.columns:
+                        curtail_df['solar_cleared'] = pd.to_numeric(df['SS_SOLAR_CLEAREDMW'], errors='coerce').fillna(0)
+                    else:
+                        curtail_df['solar_cleared'] = 0.0
+
+                    # Wind
+                    if 'SS_WIND_UIGF' in df.columns:
+                        curtail_df['wind_uigf'] = pd.to_numeric(df['SS_WIND_UIGF'], errors='coerce').fillna(0)
+                    else:
+                        curtail_df['wind_uigf'] = 0.0
+
+                    if 'SS_WIND_CLEAREDMW' in df.columns:
+                        curtail_df['wind_cleared'] = pd.to_numeric(df['SS_WIND_CLEAREDMW'], errors='coerce').fillna(0)
+                    else:
+                        curtail_df['wind_cleared'] = 0.0
+
+                    # Calculate curtailment (UIGF - Cleared, minimum 0)
+                    curtail_df['solar_curtailment'] = (curtail_df['solar_uigf'] - curtail_df['solar_cleared']).clip(lower=0)
+                    curtail_df['wind_curtailment'] = (curtail_df['wind_uigf'] - curtail_df['wind_cleared']).clip(lower=0)
+                    curtail_df['total_curtailment'] = curtail_df['solar_curtailment'] + curtail_df['wind_curtailment']
+
+                    # Filter to main regions
+                    main_regions = ['NSW1', 'QLD1', 'SA1', 'TAS1', 'VIC1']
+                    curtail_df = curtail_df[curtail_df['regionid'].isin(main_regions)]
+
+                    if not curtail_df.empty:
+                        all_data.append(curtail_df)
+
+        # Update last files
+        self.last_files['curtailment_regional5'].update(new_files)
+
+        if all_data:
+            combined_df = pd.concat(all_data, ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'regionid'])
+            combined_df = combined_df.sort_values(['settlementdate', 'regionid'])
+
+            total_curtailment = combined_df['total_curtailment'].sum()
+            logger.info(f"Collected {len(combined_df)} regional curtailment records, total: {total_curtailment:.1f} MW")
+            return combined_df
+
+        return pd.DataFrame()
+
+    def collect_5min_duid_curtailment(self) -> pd.DataFrame:
+        """
+        Collect 5-minute DUID-level curtailment data using UIGF from Next Day Dispatch.
+
+        Uses AEMO's official UIGF (Unconstrained Intermittent Generation Forecast) data
+        from the UNIT_SOLUTION table. UIGF is what a plant COULD generate based on
+        resource availability (wind/irradiance), while TOTALCLEARED is what was dispatched.
+
+        Curtailment = UIGF - TOTALCLEARED (clipped to 0)
+
+        Note: UIGF data available in Next_Day_Dispatch from July 1, 2025 onwards.
+
+        Schema:
+            settlementdate, duid, uigf, totalcleared, curtailment
+        """
+        url = self.current_urls['curtailment5']  # Same source as legacy curtailment
+        files = self.get_latest_files(url, 'PUBLIC_NEXT_DAY_DISPATCH_')
+
+        # Get only new files
+        new_files = [f for f in files if f not in self.last_files['curtailment_duid5']]
+
+        if not new_files:
+            logger.debug("No new DUID curtailment files found")
+            return pd.DataFrame()
+
+        logger.info(f"Found {len(new_files)} new files for DUID curtailment")
+
+        all_data = []
+        for filename in new_files[-5:]:  # Process last 5 files
+            try:
+                file_url = f"{url}{filename}"
+                response = requests.get(file_url, headers=self.headers, timeout=60)
+                response.raise_for_status()
+
+                # Process ZIP file - extract UNIT_SOLUTION data
+                with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                    csv_files = [f for f in z.namelist() if f.endswith('.csv') or f.endswith('.CSV')]
+
+                    if csv_files:
+                        csv_content = z.read(csv_files[0]).decode('utf-8', errors='ignore')
+
+                        # Parse line by line for UNIT_SOLUTION records
+                        for line in csv_content.split('\n'):
+                            if not line.startswith('D,DISPATCH,UNIT_SOLUTION'):
+                                continue
+
+                            parts = line.split(',')
+                            if len(parts) <= 68:  # Need at least 69 columns for UIGF
+                                continue
+
+                            try:
+                                duid = parts[6].strip('"')
+                                settlementdate = parts[4].strip('"')
+                                totalcleared = float(parts[14]) if parts[14] else 0.0
+                                uigf = float(parts[68]) if parts[68] else 0.0
+
+                                # Only include records with UIGF > 0 (semi-scheduled renewables)
+                                if uigf > 0:
+                                    curtailment = max(0.0, uigf - totalcleared)
+
+                                    all_data.append({
+                                        'settlementdate': settlementdate,
+                                        'duid': duid,
+                                        'uigf': uigf,
+                                        'totalcleared': totalcleared,
+                                        'curtailment': curtailment
+                                    })
+                            except (ValueError, IndexError):
+                                continue
+
+            except Exception as e:
+                logger.error(f"Error processing DUID curtailment file {filename}: {e}")
+                continue
+
+        # Update last files
+        self.last_files['curtailment_duid5'].update(new_files)
+
+        if all_data:
+            curtail_df = pd.DataFrame(all_data)
+            curtail_df['settlementdate'] = pd.to_datetime(curtail_df['settlementdate'], format='%Y/%m/%d %H:%M:%S')
+            curtail_df = curtail_df.drop_duplicates(subset=['settlementdate', 'duid'])
+            curtail_df = curtail_df.sort_values(['settlementdate', 'duid'])
+
+            total_curtailment = curtail_df['curtailment'].sum()
+            unique_duids = curtail_df['duid'].nunique()
+            logger.info(f"Collected {len(curtail_df)} DUID curtailment records ({unique_duids} DUIDs), total: {total_curtailment:.1f} MW")
+            return curtail_df
+
+        return pd.DataFrame()
+
     def collect_30min_trading(self) -> Dict[str, pd.DataFrame]:
         """
         Collect 30-minute trading data (prices and transmission) by properly
@@ -808,7 +994,116 @@ class UnifiedAEMOCollector:
             return combined_df
         
         return pd.DataFrame()
-    
+
+    def collect_30min_demand(self) -> pd.DataFrame:
+        """Collect 30-minute operational demand data"""
+        url = self.current_urls['demand']
+        files = self.get_latest_files(url, 'PUBLIC_ACTUAL_OPERATIONAL_DEMAND_HH_')
+
+        # Get only new files
+        new_files = [f for f in files if f not in self.last_files['demand']]
+
+        if not new_files:
+            logger.debug("No new demand files found")
+            return pd.DataFrame()
+
+        logger.info(f"Found {len(new_files)} new demand files")
+
+        all_data = []
+        # Process only the most recent files
+        files_to_process = new_files[-3:] if len(new_files) > 3 else new_files
+        for filename in files_to_process:
+            # Demand files are ZIP containing CSV (not MMS table format)
+            try:
+                file_url = f"{url}{filename}"
+                response = requests.get(file_url, headers=self.headers, timeout=60)
+                response.raise_for_status()
+
+                # Extract CSV from ZIP
+                with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+                    csv_files = [f for f in zf.namelist() if f.lower().endswith('.csv')]
+                    if not csv_files:
+                        logger.warning(f"No CSV file in {filename}")
+                        continue
+
+                    with zf.open(csv_files[0]) as f:
+                        csv_content = f.read().decode('utf-8', errors='ignore')
+
+                # Parse AEMO CSV format for OPERATIONAL_DEMAND
+                demand_df = self._parse_demand_csv(csv_content)
+
+                if not demand_df.empty:
+                    all_data.append(demand_df)
+
+            except Exception as e:
+                logger.error(f"Error processing demand file {filename}: {e}")
+                continue
+
+        # Update last files
+        self.last_files['demand'].update(files_to_process)
+
+        if all_data:
+            combined_df = pd.concat(all_data, ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'regionid'])
+            combined_df = combined_df.sort_values(['settlementdate', 'regionid'])
+            logger.info(f"Collected {len(combined_df)} new demand records")
+            return combined_df
+
+        return pd.DataFrame()
+
+    def _parse_demand_csv(self, csv_content: str) -> pd.DataFrame:
+        """Parse operational demand CSV format
+
+        Format:
+        I,OPERATIONAL_DEMAND,ACTUAL,3,REGIONID,INTERVAL_DATETIME,OPERATIONAL_DEMAND,...
+        D,OPERATIONAL_DEMAND,ACTUAL,3,NSW1,"2024/09/29 00:00:00",7416,...
+        """
+        lines = csv_content.strip().split('\n')
+
+        # Find header and data lines
+        header_line = None
+        data_lines = []
+
+        for line in lines:
+            if line.startswith('I,OPERATIONAL_DEMAND'):
+                header_line = line
+            elif line.startswith('D,OPERATIONAL_DEMAND'):
+                data_lines.append(line)
+
+        if not header_line or not data_lines:
+            return pd.DataFrame()
+
+        # Parse header
+        headers = header_line.split(',')
+
+        # Parse data rows
+        data_rows = []
+        for line in data_lines:
+            values = line.split(',')
+            values = [v.strip('"') for v in values]
+            data_rows.append(values)
+
+        # Create DataFrame
+        df = pd.DataFrame(data_rows, columns=headers)
+
+        # Extract columns by position: 4=REGIONID, 5=INTERVAL_DATETIME, 6=OPERATIONAL_DEMAND
+        try:
+            df = df.iloc[:, [4, 5, 6]].copy()
+            df.columns = ['regionid', 'settlementdate', 'demand']
+        except IndexError:
+            logger.error("Cannot extract demand columns from CSV")
+            return pd.DataFrame()
+
+        # Convert types
+        df['settlementdate'] = pd.to_datetime(df['settlementdate'])
+        df['demand'] = pd.to_numeric(df['demand'], errors='coerce')
+
+        # Remove nulls and reorder columns
+        df = df.dropna()
+        df = df[['settlementdate', 'regionid', 'demand']]
+
+        return df
+
     def merge_and_save(self, df: pd.DataFrame, output_file: Path, key_columns: List[str]) -> bool:
         """Merge new data with existing parquet file using safe merge logic"""
         try:
@@ -861,7 +1156,10 @@ class UnifiedAEMOCollector:
                 # No existing file, just save new data
                 combined_df = df.copy()
                 logger.info(f"Created new file with {len(combined_df)} records")
-            
+
+            # Ensure output directory exists
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+
             # Save to parquet
             combined_df.to_parquet(output_file, compression='snappy', index=False)
             return True
@@ -921,7 +1219,7 @@ class UnifiedAEMOCollector:
             logger.error(f"Error collecting 5-min transmission: {e}")
             results['transmission5'] = False
 
-        # Collect 5-minute curtailment
+        # Collect 5-minute curtailment (legacy DUID-based method)
         try:
             curtailment5_df = self.collect_5min_curtailment()
             results['curtailment5'] = self.merge_and_save(
@@ -932,6 +1230,30 @@ class UnifiedAEMOCollector:
         except Exception as e:
             logger.error(f"Error collecting 5-min curtailment: {e}")
             results['curtailment5'] = False
+
+        # Collect 5-minute regional curtailment (new UIGF-based method)
+        try:
+            curtailment_regional5_df = self.collect_5min_regional_curtailment()
+            results['curtailment_regional5'] = self.merge_and_save(
+                curtailment_regional5_df,
+                self.output_files['curtailment_regional5'],
+                ['settlementdate', 'regionid']
+            )
+        except Exception as e:
+            logger.error(f"Error collecting 5-min regional curtailment: {e}")
+            results['curtailment_regional5'] = False
+
+        # Collect 5-minute DUID curtailment (new UIGF-based method)
+        try:
+            curtailment_duid5_df = self.collect_5min_duid_curtailment()
+            results['curtailment_duid5'] = self.merge_and_save(
+                curtailment_duid5_df,
+                self.output_files['curtailment_duid5'],
+                ['settlementdate', 'duid']
+            )
+        except Exception as e:
+            logger.error(f"Error collecting 5-min DUID curtailment: {e}")
+            results['curtailment_duid5'] = False
 
         # Collect 30-minute data (every cycle)
         self.cycle_count += 1
@@ -981,7 +1303,19 @@ class UnifiedAEMOCollector:
         except Exception as e:
             logger.error(f"Error collecting 30-min rooftop: {e}")
             results['rooftop30'] = False
-        
+
+        # Collect 30-minute demand
+        try:
+            demand30_df = self.collect_30min_demand()
+            results['demand30'] = self.merge_and_save(
+                demand30_df,
+                self.output_files['demand30'],
+                ['settlementdate', 'regionid']
+            )
+        except Exception as e:
+            logger.error(f"Error collecting 30-min demand: {e}")
+            results['demand30'] = False
+
         # Summary
         duration = (datetime.now() - start_time).total_seconds()
         success_count = sum(results.values())
