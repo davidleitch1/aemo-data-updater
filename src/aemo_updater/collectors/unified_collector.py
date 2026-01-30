@@ -22,6 +22,15 @@ from dotenv import load_dotenv
 from ..alerts.base_alert import Alert, AlertSeverity
 from ..alerts.email_sender import EmailSender
 
+# Import Twilio price alerts
+_twilio_import_error = None
+try:
+    from .twilio_price_alerts import check_price_alerts
+    TWILIO_ALERTS_AVAILABLE = True
+except Exception as e:
+    TWILIO_ALERTS_AVAILABLE = False
+    _twilio_import_error = str(e)
+
 # Load environment variables
 load_dotenv()
 
@@ -108,6 +117,12 @@ class UnifiedAEMOCollector:
                 logger.error(f"Failed to configure email alerts: {e}")
                 self.email_alerts_enabled = False
         
+        # Log Twilio alert status
+        if TWILIO_ALERTS_AVAILABLE:
+            logger.info("Twilio price alerts: ENABLED")
+        else:
+            logger.warning(f"Twilio price alerts: DISABLED - {_twilio_import_error or 'import failed'}")
+
         logger.info("Unified AEMO collector initialized")
     
     def _load_known_duids(self) -> Set[str]:
@@ -374,10 +389,29 @@ class UnifiedAEMOCollector:
                 if 'INTERCONNECTORID' in df.columns and 'METEREDMWFLOW' in df.columns:
                     trans_df['interconnectorid'] = df['INTERCONNECTORID'].str.strip()
                     trans_df['meteredmwflow'] = pd.to_numeric(df['METEREDMWFLOW'], errors='coerce')
-                    
+
+                    # Extract additional columns with explicit handling
+                    OPTIONAL_COLUMNS = {
+                        'MWFLOW': 'mwflow',
+                        'MWLOSSES': 'mwlosses',
+                        'EXPORTLIMIT': 'exportlimit',
+                        'IMPORTLIMIT': 'importlimit'
+                    }
+
+                    for source_col, target_col in OPTIONAL_COLUMNS.items():
+                        if source_col in df.columns:
+                            trans_df[target_col] = pd.to_numeric(df[source_col], errors='coerce')
+                        else:
+                            logger.warning(f"Column {source_col} not found in AEMO data")
+                            trans_df[target_col] = pd.NA
+
+                    # Log extraction stats for monitoring
+                    valid_mwflow = trans_df['mwflow'].notna().sum() if 'mwflow' in trans_df.columns else 0
+                    logger.debug(f"Extracted {len(trans_df)} transmission records, {valid_mwflow} with valid mwflow")
+
                     # Filter out invalid values
                     trans_df = trans_df[trans_df['meteredmwflow'].notna()]
-                    
+
                     if not trans_df.empty:
                         all_data.append(trans_df)
         
@@ -723,13 +757,21 @@ class UnifiedAEMOCollector:
                 if 'INTERCONNECTORID' in trans_df.columns and 'METEREDMWFLOW' in trans_df.columns:
                     clean_trans_df['interconnectorid'] = trans_df['INTERCONNECTORID'].str.strip()
                     clean_trans_df['meteredmwflow'] = pd.to_numeric(trans_df['METEREDMWFLOW'], errors='coerce')
-                    
-                    # Also get MWFLOW if available
-                    if 'MWFLOW' in trans_df.columns:
-                        clean_trans_df['mwflow'] = pd.to_numeric(trans_df['MWFLOW'], errors='coerce')
-                    
+
+                    # Extract all transmission columns
+                    OPTIONAL_COLUMNS = {
+                        'MWFLOW': 'mwflow',
+                        'MWLOSSES': 'mwlosses',
+                        'EXPORTLIMIT': 'exportlimit',
+                        'IMPORTLIMIT': 'importlimit'
+                    }
+
+                    for source_col, target_col in OPTIONAL_COLUMNS.items():
+                        if source_col in trans_df.columns:
+                            clean_trans_df[target_col] = pd.to_numeric(trans_df[source_col], errors='coerce')
+
                     clean_trans_df = clean_trans_df[clean_trans_df['meteredmwflow'].notna()]
-                    
+
                     if not clean_trans_df.empty:
                         transmission_5min_data.append(clean_trans_df)
         
@@ -836,10 +878,12 @@ class UnifiedAEMOCollector:
                             'interconnectorid': interconnector,
                             'meteredmwflow': ic_data['meteredmwflow'].mean()
                         }
-                        
-                        if 'mwflow' in ic_data.columns:
-                            record['mwflow'] = ic_data['mwflow'].mean()
-                        
+
+                        # Include all transmission columns if available
+                        for col in ['mwflow', 'mwlosses', 'exportlimit', 'importlimit']:
+                            if col in ic_data.columns and ic_data[col].notna().any():
+                                record[col] = ic_data[col].mean()
+
                         trans_30min_records.append(record)
             
             if trans_30min_records:
@@ -1182,14 +1226,29 @@ class UnifiedAEMOCollector:
         try:
             prices5_df = self.collect_5min_prices()
             results['prices5'] = self.merge_and_save(
-                prices5_df, 
-                self.output_files['prices5'], 
+                prices5_df,
+                self.output_files['prices5'],
                 ['settlementdate', 'regionid']
             )
+
+            # Check for price alerts (Twilio SMS)
+            if TWILIO_ALERTS_AVAILABLE and not prices5_df.empty:
+                try:
+                    # Convert to format expected by check_price_alerts:
+                    # SETTLEMENTDATE as index, uppercase REGIONID and RRP columns
+                    alert_df = prices5_df.copy()
+                    alert_df = alert_df.rename(columns={
+                        'regionid': 'REGIONID',
+                        'rrp': 'RRP'
+                    })
+                    alert_df = alert_df.set_index('settlementdate')
+                    check_price_alerts(alert_df)
+                except Exception as e:
+                    logger.error(f"Error checking price alerts: {e}")
         except Exception as e:
             logger.error(f"Error collecting 5-min prices: {e}")
             results['prices5'] = False
-        
+
         # Collect 5-minute SCADA
         try:
             scada5_df = self.collect_5min_scada()
