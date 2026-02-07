@@ -63,6 +63,7 @@ class UnifiedAEMOCollector:
             'transmission30': self.data_path / 'transmission30.parquet',
             'rooftop30': self.data_path / 'rooftop30.parquet',
             'demand30': self.data_path / 'demand30.parquet',
+            'predispatch': self.data_path / 'predispatch.parquet',
         }
         
         # URLs for current data
@@ -74,6 +75,7 @@ class UnifiedAEMOCollector:
             'trading': 'http://nemweb.com.au/Reports/CURRENT/TradingIS_Reports/',
             'rooftop': 'http://nemweb.com.au/Reports/CURRENT/ROOFTOP_PV/ACTUAL/',
             'demand': 'http://nemweb.com.au/Reports/Current/Operational_Demand/ACTUAL_HH/',
+            'predispatch': 'http://www.nemweb.com.au/Reports/Current/Predispatch_Reports/',
         }
         
         # Headers for requests
@@ -94,6 +96,9 @@ class UnifiedAEMOCollector:
         
         # Collect all data types every cycle (no frequency limiting)
         self.cycle_count = 0
+
+        # Track last P30 run_time to avoid duplicate collection
+        self.last_predispatch_run_time = None
         
         # Track known DUIDs
         self.known_duids_file = self.data_path / 'known_duids.txt'
@@ -1212,6 +1217,106 @@ class UnifiedAEMOCollector:
             logger.error(f"Error merging data to {output_file}: {e}")
             return False
     
+
+    def collect_predispatch(self) -> pd.DataFrame:
+        """
+        Collect P30 pre-dispatch forecast data from NEMWeb.
+
+        Returns DataFrame with columns:
+        - run_time: when P30 was issued
+        - settlementdate: forecasted period
+        - regionid: region
+        - price_forecast: predicted price
+        - demand_forecast: predicted demand (MW)
+        - solar_forecast: predicted solar (MW)
+        - wind_forecast: predicted wind (MW)
+        """
+        try:
+            url = self.current_urls['predispatch']
+            response = requests.get(url, headers=self.headers, timeout=30)
+
+            # Find latest P30 file
+            import re as regex
+            pattern = r'PUBLIC_PREDISPATCH_(\d{12})_(\d{14})_LEGACY\.zip'
+            matches = regex.findall(pattern, response.text)
+
+            if not matches:
+                logger.warning("No pre-dispatch files found")
+                return pd.DataFrame()
+
+            # Get latest file
+            latest = sorted(set(matches))[-1]
+            run_time = datetime.strptime(latest[0], '%Y%m%d%H%M')
+
+            # Check if we already processed this run
+            if self.last_predispatch_run_time == run_time:
+                logger.debug(f"P30 run {run_time.strftime('%H:%M')} already processed")
+                return pd.DataFrame()
+
+            filename = f"PUBLIC_PREDISPATCH_{latest[0]}_{latest[1]}_LEGACY.zip"
+            file_url = url + filename
+
+            logger.info(f"Fetching P30 forecast: {filename}")
+            zip_response = requests.get(file_url, headers=self.headers, timeout=60)
+
+            with zipfile.ZipFile(io.BytesIO(zip_response.content)) as zf:
+                csv_name = [n for n in zf.namelist() if n.endswith('.CSV')][0]
+                csv_content = zf.read(csv_name).decode('utf-8')
+
+            # Parse PDREGION data
+            lines = csv_content.split('\n')
+            header_line = None
+            data_rows = []
+
+            for line in lines:
+                if line.startswith('I,PDREGION,'):
+                    parts = line.split(',')
+                    header_line = parts[4:]
+                elif line.startswith('D,PDREGION,'):
+                    parts = line.split(',')
+                    data_rows.append(parts[4:])
+
+            if header_line is None or not data_rows:
+                logger.warning("No PDREGION data found in pre-dispatch file")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(data_rows, columns=header_line)
+
+            # Parse and rename columns
+            df['regionid'] = df['REGIONID'].astype(str)
+            df['settlementdate'] = pd.to_datetime(df['PERIODID'], format='"%Y/%m/%d %H:%M:%S"')
+            df['price_forecast'] = pd.to_numeric(df['RRP'], errors='coerce')
+            df['demand_forecast'] = pd.to_numeric(df['TOTALDEMAND'], errors='coerce')
+
+            # Solar and wind if available
+            if 'SS_SOLAR_AVAILABILITY' in df.columns:
+                df['solar_forecast'] = pd.to_numeric(df['SS_SOLAR_AVAILABILITY'], errors='coerce')
+            else:
+                df['solar_forecast'] = None
+
+            if 'SS_WIND_AVAILABILITY' in df.columns:
+                df['wind_forecast'] = pd.to_numeric(df['SS_WIND_AVAILABILITY'], errors='coerce')
+            else:
+                df['wind_forecast'] = None
+
+            # Add run_time column
+            df['run_time'] = run_time
+
+            # Select final columns
+            result_df = df[['run_time', 'settlementdate', 'regionid',
+                           'price_forecast', 'demand_forecast',
+                           'solar_forecast', 'wind_forecast']].copy()
+
+            # Update last run time
+            self.last_predispatch_run_time = run_time
+
+            logger.info(f"Collected P30 forecast run {run_time.strftime('%Y-%m-%d %H:%M')} with {len(result_df)} rows")
+            return result_df
+
+        except Exception as e:
+            logger.error(f"Error collecting predispatch: {e}")
+            return pd.DataFrame()
+
     def run_single_update(self) -> Dict[str, bool]:
         """Run a single update cycle for all data types"""
         logger.info("=== Starting unified update cycle ===")
@@ -1374,6 +1479,21 @@ class UnifiedAEMOCollector:
         except Exception as e:
             logger.error(f"Error collecting 30-min demand: {e}")
             results['demand30'] = False
+
+        # Collect P30 pre-dispatch forecasts
+        try:
+            predispatch_df = self.collect_predispatch()
+            if not predispatch_df.empty:
+                results['predispatch'] = self.merge_and_save(
+                    predispatch_df,
+                    self.output_files['predispatch'],
+                    ['run_time', 'settlementdate', 'regionid']
+                )
+            else:
+                results['predispatch'] = True  # No new data is OK
+        except Exception as e:
+            logger.error(f"Error collecting predispatch: {e}")
+            results['predispatch'] = False
 
         # Summary
         duration = (datetime.now() - start_time).total_seconds()
