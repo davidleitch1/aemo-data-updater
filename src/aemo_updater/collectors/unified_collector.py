@@ -63,6 +63,7 @@ class UnifiedAEMOCollector:
             'transmission30': self.data_path / 'transmission30.parquet',
             'rooftop30': self.data_path / 'rooftop30.parquet',
             'demand30': self.data_path / 'demand30.parquet',
+            'bdu5': self.data_path / 'bdu5.parquet',
             'predispatch': self.data_path / 'predispatch.parquet',
         }
         
@@ -75,6 +76,7 @@ class UnifiedAEMOCollector:
             'trading': 'http://nemweb.com.au/Reports/CURRENT/TradingIS_Reports/',
             'rooftop': 'http://nemweb.com.au/Reports/CURRENT/ROOFTOP_PV/ACTUAL/',
             'demand': 'http://nemweb.com.au/Reports/Current/Operational_Demand/ACTUAL_HH/',
+            'demand_less_snsg': 'http://nemweb.com.au/Reports/Current/Operational_Demand_Less_SNSG/ACTUAL_HH/',
             'predispatch': 'http://www.nemweb.com.au/Reports/Current/Predispatch_Reports/',
         }
         
@@ -92,6 +94,8 @@ class UnifiedAEMOCollector:
             'trading': set(),
             'rooftop': set(),
             'demand': set(),
+            'demand_less_snsg': set(),
+            'bdu5': set(),
         }
         
         # Collect all data types every cycle (no frequency limiting)
@@ -1153,6 +1157,156 @@ class UnifiedAEMOCollector:
 
         return df
 
+    def collect_30min_demand_less_snsg(self) -> pd.DataFrame:
+        """Collect 30-minute operational demand less SNSG data.
+
+        Source: Operational_Demand_Less_SNSG/ACTUAL_HH/
+        Returns DataFrame with columns: [settlementdate, regionid, demand_less_snsg]
+        """
+        url = self.current_urls['demand_less_snsg']
+        files = self.get_latest_files(url, 'PUBLIC_ACTUAL_OPERATIONAL_DEM_LESS_SNSG_HH_')
+
+        new_files = [f for f in files if f not in self.last_files['demand_less_snsg']]
+
+        if not new_files:
+            logger.debug("No new demand_less_snsg files found")
+            return pd.DataFrame()
+
+        logger.info(f"Found {len(new_files)} new demand_less_snsg files")
+
+        all_data = []
+        files_to_process = new_files[-3:] if len(new_files) > 3 else new_files
+        for filename in files_to_process:
+            try:
+                file_url = f"{url}{filename}"
+                response = requests.get(file_url, headers=self.headers, timeout=60)
+                response.raise_for_status()
+
+                with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+                    csv_files = [f for f in zf.namelist() if f.lower().endswith('.csv')]
+                    if not csv_files:
+                        continue
+                    with zf.open(csv_files[0]) as f:
+                        csv_content = f.read().decode('utf-8', errors='ignore')
+
+                snsg_df = self._parse_demand_less_snsg_csv(csv_content)
+                if not snsg_df.empty:
+                    all_data.append(snsg_df)
+
+            except Exception as e:
+                logger.error(f"Error processing demand_less_snsg file {filename}: {e}")
+                continue
+
+        self.last_files['demand_less_snsg'].update(files_to_process)
+
+        if all_data:
+            combined_df = pd.concat(all_data, ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'regionid'])
+            combined_df = combined_df.sort_values(['settlementdate', 'regionid'])
+            logger.info(f"Collected {len(combined_df)} new demand_less_snsg records")
+            return combined_df
+
+        return pd.DataFrame()
+
+    def _parse_demand_less_snsg_csv(self, csv_content: str) -> pd.DataFrame:
+        """Parse operational demand less SNSG CSV format.
+
+        Format:
+        I,OPERATIONAL_DEM_LESS_SNSG,ACTUAL,1,REGIONID,INTERVAL_DATETIME,OPERATIONAL_DEMAND_LESS_SNSG,...
+        D,OPERATIONAL_DEM_LESS_SNSG,ACTUAL,1,NSW1,"2025/01/30 04:30:00",6482,...
+        """
+        lines = csv_content.strip().split('\n')
+        data_lines = []
+        for line in lines:
+            if line.startswith('D,OPERATIONAL_DEM_LESS_SNSG'):
+                data_lines.append(line)
+
+        if not data_lines:
+            return pd.DataFrame()
+
+        data_rows = []
+        for line in data_lines:
+            values = line.split(',')
+            values = [v.strip('"') for v in values]
+            if len(values) >= 7:
+                data_rows.append({
+                    'regionid': values[4],
+                    'settlementdate': values[5],
+                    'demand_less_snsg': values[6],
+                })
+
+        if not data_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data_rows)
+        df['settlementdate'] = pd.to_datetime(df['settlementdate'])
+        df['demand_less_snsg'] = pd.to_numeric(df['demand_less_snsg'], errors='coerce')
+        df = df.dropna(subset=['demand_less_snsg'])
+        df = df[['settlementdate', 'regionid', 'demand_less_snsg']]
+        return df
+
+    def collect_5min_bdu(self) -> pd.DataFrame:
+        """Collect 5-minute BDU (Bidirectional Unit / battery) data from DISPATCHREGIONSUM.
+
+        Extracts battery generation, charging, and storage level from the same
+        DispatchIS REGIONSUM table used for curtailment data.
+
+        Returns DataFrame with columns:
+            [settlementdate, regionid, bdu_clearedmw_gen, bdu_clearedmw_load, bdu_energy_storage]
+        """
+        url = self.current_urls['prices5']  # Same source as prices/curtailment
+        files = self.get_latest_files(url, 'PUBLIC_DISPATCHIS_')
+
+        new_files = [f for f in files if f not in self.last_files['bdu5']]
+
+        if not new_files:
+            logger.debug("No new BDU files found")
+            return pd.DataFrame()
+
+        logger.info(f"Found {len(new_files)} new files for BDU data")
+
+        all_data = []
+        for filename in new_files[-5:]:
+            df = self.download_and_parse_file(url, filename, 'REGIONSUM')
+
+            if not df.empty and 'SETTLEMENTDATE' in df.columns and 'REGIONID' in df.columns:
+                bdu_df = pd.DataFrame()
+                bdu_df['settlementdate'] = pd.to_datetime(
+                    df['SETTLEMENTDATE'].str.strip('"'),
+                    format='%Y/%m/%d %H:%M:%S'
+                )
+                bdu_df['regionid'] = df['REGIONID'].str.strip()
+
+                bdu_columns = {
+                    'BDU_CLEAREDMW_GEN': 'bdu_clearedmw_gen',
+                    'BDU_CLEAREDMW_LOAD': 'bdu_clearedmw_load',
+                    'BDU_ENERGY_STORAGE': 'bdu_energy_storage',
+                }
+                for raw_col, out_col in bdu_columns.items():
+                    if raw_col in df.columns:
+                        bdu_df[out_col] = pd.to_numeric(
+                            df[raw_col].str.strip().replace('', pd.NA), errors='coerce'
+                        )
+                    else:
+                        bdu_df[out_col] = pd.NA
+
+                main_regions = ['NSW1', 'QLD1', 'SA1', 'TAS1', 'VIC1']
+                bdu_df = bdu_df[bdu_df['regionid'].isin(main_regions)]
+
+                if not bdu_df.empty:
+                    all_data.append(bdu_df)
+
+        self.last_files['bdu5'].update(new_files)
+
+        if all_data:
+            combined_df = pd.concat(all_data, ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'regionid'])
+            combined_df = combined_df.sort_values(['settlementdate', 'regionid'])
+            logger.info(f"Collected {len(combined_df)} BDU records")
+            return combined_df
+
+        return pd.DataFrame()
+
     def merge_and_save(self, df: pd.DataFrame, output_file: Path, key_columns: List[str]) -> bool:
         """Merge new data with existing parquet file using safe merge logic"""
         try:
@@ -1419,6 +1573,18 @@ class UnifiedAEMOCollector:
             logger.error(f"Error collecting 5-min DUID curtailment: {e}")
             results['curtailment_duid5'] = False
 
+        # Collect 5-minute BDU (battery) data
+        try:
+            bdu5_df = self.collect_5min_bdu()
+            results['bdu5'] = self.merge_and_save(
+                bdu5_df,
+                self.output_files['bdu5'],
+                ['settlementdate', 'regionid']
+            )
+        except Exception as e:
+            logger.error(f"Error collecting 5-min BDU: {e}")
+            results['bdu5'] = False
+
         # Collect 30-minute data (every cycle)
         self.cycle_count += 1
         logger.info("Collecting 30-minute data...")
@@ -1479,6 +1645,40 @@ class UnifiedAEMOCollector:
         except Exception as e:
             logger.error(f"Error collecting 30-min demand: {e}")
             results['demand30'] = False
+
+        # Collect 30-minute demand less SNSG and merge into demand30
+        try:
+            demand_less_snsg_df = self.collect_30min_demand_less_snsg()
+            if not demand_less_snsg_df.empty:
+                demand30_path = self.output_files['demand30']
+                if demand30_path.exists():
+                    existing = pd.read_parquet(demand30_path)
+                    # Ensure column exists
+                    if 'demand_less_snsg' not in existing.columns:
+                        existing['demand_less_snsg'] = pd.NA
+                    # Drop old values for the timestamps we have new data for,
+                    # then merge new values via left join
+                    merged = existing.merge(
+                        demand_less_snsg_df[['settlementdate', 'regionid', 'demand_less_snsg']],
+                        on=['settlementdate', 'regionid'],
+                        how='left',
+                        suffixes=('', '_new')
+                    )
+                    # Use new value where available, keep existing otherwise
+                    merged['demand_less_snsg'] = merged['demand_less_snsg_new'].combine_first(
+                        merged['demand_less_snsg']
+                    )
+                    merged = merged.drop(columns=['demand_less_snsg_new'])
+                    merged.to_parquet(demand30_path, compression='snappy', index=False)
+                    logger.info(f"Updated {len(demand_less_snsg_df)} demand_less_snsg records in demand30")
+                    results['demand_less_snsg'] = True
+                else:
+                    results['demand_less_snsg'] = False
+            else:
+                results['demand_less_snsg'] = True  # No new data is OK
+        except Exception as e:
+            logger.error(f"Error collecting demand_less_snsg: {e}")
+            results['demand_less_snsg'] = False
 
         # Collect P30 pre-dispatch forecasts
         try:
