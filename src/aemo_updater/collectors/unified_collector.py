@@ -5,6 +5,7 @@ Collects both 5-minute and 30-minute data in a single cycle
 Updates new parquet file structure with proper merge logic
 """
 
+import re
 import requests
 import zipfile
 import io
@@ -12,7 +13,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 from bs4 import BeautifulSoup
 import time
 import os
@@ -36,6 +37,83 @@ load_dotenv()
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+def classify_duid_fuel(duid: str) -> Tuple[str, str]:
+    """Infer fuel type from DUID naming patterns.
+
+    Returns (fuel_type, confidence) where:
+      fuel_type: 'Battery Storage', 'Solar', 'Wind', 'Water',
+                 'Rooftop Solar', 'Distributed Gen', or 'Unknown'
+      confidence: 'high', 'medium', or 'low'
+    """
+    d = duid.upper()
+
+    # Aggregated / virtual categories
+    if d.startswith('RT_'):
+        return ('Rooftop Solar', 'high')
+    if d.startswith('DG_'):
+        return ('Distributed Gen', 'high')
+
+    # Battery — explicit keywords
+    if 'BESS' in d:
+        return ('Battery Storage', 'high')
+    if 'BATTERY' in d or 'BATRY' in d:
+        return ('Battery Storage', 'high')
+
+    # Battery — gen/load split patterns (G/L suffix)
+    # e.g. ADPBA1G, BOWWBA1L, HVWWBA1G
+    if re.search(r'BA\d+[GL]$', d):
+        return ('Battery Storage', 'high')
+    # e.g. BULBESG1, CAPBES1G — BES + optional digits + G/L + optional digits
+    if re.search(r'BES\d*[GL]\d*$', d):
+        return ('Battery Storage', 'high')
+    # e.g. HBESSG1, WDBESSG1, RESS1G — ESS + optional digits + G/L + optional digits
+    if re.search(r'ESS\d*[GL]\d*$', d):
+        return ('Battery Storage', 'high')
+    # e.g. VBBG1, LBBL1, TB2BG1, QBYNBG1
+    if re.search(r'B[GL]\d+$', d):
+        return ('Battery Storage', 'medium')
+    # Hornsdale Power Reserve gen/load
+    if re.search(r'HPR[GL]\d*$', d):
+        return ('Battery Storage', 'high')
+    # PBS = Power Battery Storage (e.g. LGAPBS1)
+    if 'PBS' in d:
+        return ('Battery Storage', 'medium')
+    # BBF = Battery Farm (e.g. SWANBBF1)
+    if 'BBF' in d:
+        return ('Battery Storage', 'medium')
+    # SFB = Solar Farm Battery (e.g. QPSFB1)
+    if re.search(r'SFB\d', d):
+        return ('Battery Storage', 'medium')
+
+    # Solar
+    if re.search(r'SF\d', d):
+        return ('Solar', 'high')
+    if 'SOLAR' in d:
+        return ('Solar', 'high')
+    if re.search(r'PV\d', d):
+        return ('Solar', 'high')
+    if re.search(r'SP\d+$', d) and 'PH' not in d:
+        return ('Solar', 'medium')
+
+    # Wind
+    if 'WF' in d:
+        return ('Wind', 'high')
+    if 'WIND' in d:
+        return ('Wind', 'high')
+
+    # Hydro / Pumped Hydro
+    if 'PUMP' in d:
+        return ('Water', 'high')
+    if re.search(r'PH[GL]\d', d):
+        return ('Water', 'high')
+    # Well-known hydro DUIDs without pattern indicators
+    if d in ('SNOWYP', 'SHOAL1'):
+        return ('Water', 'high')
+
+    return ('Unknown', 'low')
+
 
 class UnifiedAEMOCollector:
     """Unified collector for all AEMO data types"""
@@ -82,6 +160,9 @@ class UnifiedAEMOCollector:
         
         # Headers for requests
         self.headers = {'User-Agent': 'AEMO Dashboard Data Collector'}
+
+        # Max files to download per data type per cycle (increase for backfill)
+        self.max_files_per_cycle = self.config.get('max_files_per_cycle', 5)
         
         # Last update timestamps
         self.last_files = {
@@ -166,30 +247,46 @@ class UnifiedAEMOCollector:
         return list(new_duids)
     
     def _send_new_duid_alert(self, new_duids: List[str]):
-        """Send email alert for new DUIDs"""
+        """Send email alert for new DUIDs with inferred fuel classification."""
         if not self.email_alerts_enabled or not self.email_sender:
             return
-        
+
         try:
+            # Classify each new DUID
+            classified = []
+            for duid in sorted(new_duids):
+                fuel, confidence = classify_duid_fuel(duid)
+                classified.append((duid, fuel, confidence))
+
+            lines = []
+            for duid, fuel, conf in classified:
+                if fuel != 'Unknown':
+                    lines.append(f"  • {duid}  →  {fuel} ({conf} confidence)")
+                else:
+                    lines.append(f"  • {duid}  →  (unclassified)")
+
             alert = Alert(
                 title=f"New DUIDs Discovered: {len(new_duids)} new units",
-                message=f"The following new DUIDs have been discovered in the AEMO data:\n\n" + 
-                       "\n".join(f"  • {duid}" for duid in sorted(new_duids)),
+                message=(
+                    "The following new DUIDs have been discovered in the AEMO data:\n\n"
+                    + "\n".join(lines)
+                ),
                 severity=AlertSeverity.INFO,
                 source="UnifiedCollector",
                 metadata={
                     "new_duids": new_duids,
+                    "classifications": {d: f for d, f, _ in classified},
                     "total_known_duids": len(self.known_duids),
                     "timestamp": datetime.now().isoformat()
                 }
             )
-            
+
             success = self.email_sender.send(alert)
             if success:
                 logger.info(f"Email alert sent for {len(new_duids)} new DUIDs")
             else:
                 logger.error("Failed to send new DUID email alert")
-                
+
         except Exception as e:
             logger.error(f"Error sending new DUID alert: {e}")
     
@@ -287,7 +384,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new price files")
         
         all_data = []
-        for filename in new_files[-5:]:  # Process last 5 files to avoid overload
+        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files to avoid overload
             df = self.download_and_parse_file(url, filename, 'PRICE')
             
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -336,7 +433,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new SCADA files")
         
         all_data = []
-        for filename in new_files[-5:]:  # Process last 5 files
+        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
             df = self.download_and_parse_file(url, filename, 'UNIT_SCADA')
             
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -384,7 +481,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new transmission files")
         
         all_data = []
-        for filename in new_files[-5:]:  # Process last 5 files
+        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
             df = self.download_and_parse_file(url, filename, 'INTERCONNECTORRES')
             
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -456,7 +553,7 @@ class UnifiedAEMOCollector:
         wind_solar_pattern = re.compile(r'(WF|SF|SOLAR|WIND|PV)', re.IGNORECASE)
 
         all_data = []
-        for filename in new_files[-5:]:  # Process last 5 files
+        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
             try:
                 file_url = f"{url}{filename}"
                 response = requests.get(file_url, headers=self.headers, timeout=60)
@@ -555,7 +652,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new files for regional curtailment")
 
         all_data = []
-        for filename in new_files[-5:]:  # Process last 5 files
+        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
             df = self.download_and_parse_file(url, filename, 'REGIONSUM')
 
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -646,7 +743,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new files for DUID curtailment")
 
         all_data = []
-        for filename in new_files[-5:]:  # Process last 5 files
+        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
             try:
                 file_url = f"{url}{filename}"
                 response = requests.get(file_url, headers=self.headers, timeout=60)
@@ -1266,7 +1363,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new files for BDU data")
 
         all_data = []
-        for filename in new_files[-5:]:
+        for filename in new_files[-self.max_files_per_cycle:]:
             df = self.download_and_parse_file(url, filename, 'REGIONSUM')
 
             if not df.empty and 'SETTLEMENTDATE' in df.columns and 'REGIONID' in df.columns:

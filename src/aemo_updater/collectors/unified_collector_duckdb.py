@@ -9,27 +9,39 @@ instead of parquet files. Provides:
   - demand_less_snsg: SQL UPDATE (replaces merge+combine_first pattern)
 
 Usage:
-  python -m aemo_updater.collectors.unified_collector_duckdb        # continuous
-  python -m aemo_updater.collectors.unified_collector_duckdb --once  # single cycle
+  python -m aemo_updater.collectors.unified_collector_duckdb              # continuous
+  python -m aemo_updater.collectors.unified_collector_duckdb --once       # single cycle
+  python -m aemo_updater.collectors.unified_collector_duckdb --backfill 200 --once  # backfill
 """
 
 import logging
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import duckdb
 import pandas as pd
 
-from .unified_collector import UnifiedAEMOCollector
+from .unified_collector import UnifiedAEMOCollector, classify_duid_fuel
 
 logger = logging.getLogger(__name__)
+
+# Log file path (used by main() for dual logging)
+LOG_FILE = Path('/Users/davidleitch/aemo_production/aemo-data-updater/logs/duckdb_collector.log')
 
 
 class DuckDBCollector(UnifiedAEMOCollector):
     """DuckDB-backed AEMO collector. Inherits all collection methods,
     replaces only the storage layer."""
+
+    # Critical data types that trigger SMS alerts on repeated failure
+    CRITICAL_TYPES = ['prices5', 'scada5']
+    # Consecutive failures before alerting
+    ALERT_THRESHOLD = 3
+    # Minimum time between alerts for the same issue (seconds)
+    ALERT_COOLDOWN = 3600  # 1 hour
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -57,6 +69,53 @@ class DuckDBCollector(UnifiedAEMOCollector):
         # Table name mapping (output_files key -> DuckDB table name)
         # They're the same names, but we keep the mapping explicit
         self.table_names = {k: k for k in self.output_files}
+
+        # Health monitoring state
+        self._failure_counts = {k: 0 for k in self.output_files}
+        self._last_alert_times = {}  # {issue_key: datetime}
+        self._twilio_client = None
+
+    def _init_twilio(self):
+        """Lazy-init Twilio client for collector health alerts."""
+        if self._twilio_client is not None:
+            return self._twilio_client
+        try:
+            from twilio.rest import Client
+            sid = os.getenv('TWILIO_ACCOUNT_SID')
+            token = os.getenv('TWILIO_AUTH_TOKEN')
+            if sid and token:
+                self._twilio_client = Client(sid, token)
+                return self._twilio_client
+        except Exception as e:
+            logger.warning(f"Could not initialize Twilio for health alerts: {e}")
+        self._twilio_client = False  # sentinel: tried and failed
+        return None
+
+    def _send_collector_alert(self, message: str, issue_key: str = 'general'):
+        """Send SMS alert for collector health issues with cooldown."""
+        now = datetime.now()
+        last_alert = self._last_alert_times.get(issue_key)
+        if last_alert and (now - last_alert).total_seconds() < self.ALERT_COOLDOWN:
+            logger.debug(f"Alert suppressed (cooldown): {issue_key}")
+            return
+
+        client = self._init_twilio()
+        if not client:
+            logger.error(f"Cannot send alert (no Twilio): {message}")
+            return
+
+        from_number = os.getenv('TWILIO_PHONE_NUMBER')
+        to_number = os.getenv('MY_PHONE_NUMBER')
+        if not from_number or not to_number:
+            logger.error("Missing TWILIO_PHONE_NUMBER or MY_PHONE_NUMBER")
+            return
+
+        try:
+            client.messages.create(body=message, from_=from_number, to=to_number)
+            self._last_alert_times[issue_key] = now
+            logger.info(f"Health alert SMS sent: {message}")
+        except Exception as e:
+            logger.error(f"Failed to send health alert SMS: {e}")
 
     def merge_and_save(self, df: pd.DataFrame, output_file: Path,
                        key_columns: List[str]) -> bool:
@@ -320,16 +379,101 @@ class DuckDBCollector(UnifiedAEMOCollector):
 
         return results
 
-    def _open_conn(self):
-        """Open DuckDB connection."""
-        self.conn = duckdb.connect(str(self.db_path))
-        self.conn.execute("PRAGMA force_compression='Dictionary'")
+    def _open_conn(self, max_retries=5, base_delay=2.0):
+        """Open DuckDB connection with retry on lock conflict."""
+        for attempt in range(max_retries):
+            try:
+                self.conn = duckdb.connect(str(self.db_path))
+                self.conn.execute("PRAGMA force_compression='Dictionary'")
+                return
+            except duckdb.IOException as e:
+                if attempt < max_retries - 1:
+                    wait = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"DuckDB lock conflict (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait:.0f}s: {e}"
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.error(f"DuckDB lock conflict after {max_retries} attempts: {e}")
+                    self._send_collector_alert(
+                        f"AEMO collector BLOCKED: Cannot acquire DuckDB lock after "
+                        f"{max_retries} attempts. Another process may be holding an "
+                        f"exclusive connection. Check dashboard processes.",
+                        issue_key='lock_conflict'
+                    )
+                    raise
 
     def _close_conn(self):
         """Close DuckDB connection, releasing file lock for other processes."""
         if self.conn:
             self.conn.close()
             self.conn = None
+
+    def _check_new_duids(self, df: pd.DataFrame) -> List[str]:
+        """Check for new DUIDs and auto-insert classified ones into duid_mapping."""
+        new_duids = super()._check_new_duids(df)
+        if new_duids and self.conn:
+            self._auto_insert_duid_mapping(new_duids)
+        return new_duids
+
+    def _auto_insert_duid_mapping(self, new_duids: List[str]):
+        """Insert auto-classified DUIDs into duid_mapping table."""
+        rows = []
+        for duid in new_duids:
+            fuel, confidence = classify_duid_fuel(duid)
+            if fuel in ('Unknown', 'Rooftop Solar', 'Distributed Gen'):
+                continue
+            if confidence == 'low':
+                continue
+            rows.append({
+                'region': '',
+                'site name': f'[auto-classified {datetime.now().strftime("%Y-%m-%d")}]',
+                'owner': '',
+                'duid': duid,
+                'capacity_mw': 0.0,
+                'storage_mwh': 0.0,
+                'fuel': fuel,
+            })
+
+        if not rows:
+            return
+
+        insert_df = pd.DataFrame(rows)
+        try:
+            self.conn.register('_new_duids', insert_df)
+            try:
+                col_list = ', '.join(f'"{c}"' for c in insert_df.columns)
+                self.conn.execute(
+                    f"INSERT INTO duid_mapping ({col_list}) "
+                    f"SELECT {col_list} FROM _new_duids"
+                )
+                logger.info(
+                    f"Auto-inserted {len(rows)} classified DUIDs into duid_mapping: "
+                    + ", ".join(r['duid'] for r in rows)
+                )
+            finally:
+                self.conn.unregister('_new_duids')
+        except Exception as e:
+            logger.error(f"Failed to auto-insert DUIDs into duid_mapping: {e}")
+
+    def _update_failure_tracking(self, results: Dict[str, bool]):
+        """Update failure counts and send SMS alerts for critical types."""
+        for data_type, success in results.items():
+            if success:
+                self._failure_counts[data_type] = 0
+            else:
+                self._failure_counts[data_type] = self._failure_counts.get(data_type, 0) + 1
+
+        # Check critical types for sustained failures
+        for dt in self.CRITICAL_TYPES:
+            count = self._failure_counts.get(dt, 0)
+            if count >= self.ALERT_THRESHOLD:
+                self._send_collector_alert(
+                    f"AEMO collector: {dt} has failed {count} consecutive cycles "
+                    f"(~{count * 4.5:.0f} min). Data may be stale.",
+                    issue_key=f'failure_{dt}'
+                )
 
     def run_continuous(self, update_interval_minutes: float = 4.5):
         """Run continuous collection, releasing the DB lock between cycles.
@@ -338,8 +482,6 @@ class DuckDBCollector(UnifiedAEMOCollector):
         By closing the connection during the sleep period, the dashboard and
         comparison scripts can read the database concurrently.
         """
-        import time
-
         logger.info("Starting DuckDB continuous collection...")
         logger.info(f"Update interval: {update_interval_minutes} minutes")
 
@@ -358,8 +500,18 @@ class DuckDBCollector(UnifiedAEMOCollector):
                     successful_types = [k for k, v in results.items() if v]
                     logger.info(f"Updated: {', '.join(successful_types)}")
 
+                # Track failures and alert on critical issues
+                self._update_failure_tracking(results)
+
+            except duckdb.IOException as e:
+                logger.error(f"DuckDB lock error in cycle {cycle_count}: {e}")
+                # _open_conn already sent an alert if retries exhausted
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
+                self._send_collector_alert(
+                    f"AEMO collector unexpected error in cycle {cycle_count}: {e}",
+                    issue_key='unexpected_error'
+                )
             finally:
                 self._close_conn()
 
@@ -376,19 +528,35 @@ def main():
     """Run the DuckDB collector."""
     import argparse
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s %(levelname)s %(message)s'
-    )
+    # Set up dual logging: stdout + file
+    log_format = '%(asctime)s %(levelname)s %(message)s'
+    logging.basicConfig(level=logging.INFO, format=log_format)
+
+    # Add file handler so logs persist regardless of how collector is started
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(str(LOG_FILE))
+    file_handler.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(file_handler)
 
     parser = argparse.ArgumentParser(description='DuckDB-backed AEMO collector')
     parser.add_argument('--once', action='store_true', help='Run single cycle then exit')
+    parser.add_argument('--backfill', type=int, default=0,
+                        help='Backfill mode: download last N files per type (default 5)')
     args = parser.parse_args()
 
-    collector = DuckDBCollector()
+    config = {}
+    if args.backfill > 0:
+        config['max_files_per_cycle'] = args.backfill
+        logger.info(f"Backfill mode: downloading last {args.backfill} files per type")
 
-    if args.once:
-        collector.run_single_update()
+    collector = DuckDBCollector(config=config)
+
+    if args.once or args.backfill > 0:
+        collector._open_conn()
+        try:
+            collector.run_single_update()
+        finally:
+            collector._close_conn()
     else:
         collector.run_continuous()
 
