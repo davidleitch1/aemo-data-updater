@@ -19,6 +19,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+import shutil
 from typing import Dict, List, Optional
 
 import duckdb
@@ -410,6 +411,30 @@ class DuckDBCollector(UnifiedAEMOCollector):
             self.conn.close()
             self.conn = None
 
+    def _copy_to_readonly(self):
+        """Copy the DuckDB file to a read-only replica for dashboard access.
+
+        Uses atomic rename (shutil.copy2 to .tmp, then os.rename) so readers
+        never see a partially-written file. ~1s for 1.2 GB on local APFS.
+        """
+        readonly_path = self.db_path.parent / 'aemo_readonly.duckdb'
+        tmp_path = self.db_path.parent / 'aemo_readonly.duckdb.tmp'
+
+        try:
+            start = time.time()
+            shutil.copy2(str(self.db_path), str(tmp_path))
+            os.rename(str(tmp_path), str(readonly_path))
+            elapsed = time.time() - start
+            logger.info(f'Copied DB to read-only replica in {elapsed:.1f}s')
+        except Exception as e:
+            logger.error(f'Failed to copy read-only replica: {e}')
+            # Clean up partial copy
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
     def _check_new_duids(self, df: pd.DataFrame) -> List[str]:
         """Check for new DUIDs and auto-insert classified ones into duid_mapping."""
         new_duids = super()._check_new_duids(df)
@@ -514,6 +539,7 @@ class DuckDBCollector(UnifiedAEMOCollector):
                 )
             finally:
                 self._close_conn()
+                self._copy_to_readonly()
 
             logger.info(f"Waiting {update_interval_minutes} minutes for next cycle...")
             time.sleep(update_interval_seconds)
@@ -557,6 +583,7 @@ def main():
             collector.run_single_update()
         finally:
             collector._close_conn()
+            collector._copy_to_readonly()
     else:
         collector.run_continuous()
 
