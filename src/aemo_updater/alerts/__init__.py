@@ -21,6 +21,7 @@ from .alert_manager import AlertManager
 from .base_alert import Alert, AlertChannel, AlertSeverity
 from .context import AlertContext
 from .dispatcher import AlertDispatcher
+from .plugins.data_freshness import DataFreshnessPlugin
 from .plugins.new_duid import NewDuidPlugin
 from .plugins.price_breach import PriceBreachPlugin
 from .routing import ALERT_ROUTING, DEFAULT_SINKS
@@ -69,6 +70,7 @@ def build_default_dispatcher(
         plugins = [
             PriceBreachPlugin(query_fn=price_query_fn),
             NewDuidPlugin(),
+            DataFreshnessPlugin(),
         ]
     return AlertDispatcher(
         plugins=plugins,

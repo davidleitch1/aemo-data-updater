@@ -26,8 +26,14 @@ ALERT_ROUTING: dict[str, list[str]] = {
     # inline (Phase B); not pushed.
     'new-duid-detected':        ['email', 'log'],
 
+    # ── Step 7 (DataFreshnessPlugin) ──────────────────────────────────
+    # Stale → admin email (operational). Missing → email + sms because
+    # missing data usually means the pipeline has failed and the
+    # operator needs to act quickly.
+    'data-file-stale':          ['email', 'log'],
+    'data-file-missing':        ['email', 'sms', 'log'],
+
     # Populated by future steps:
-    #   step 7  →  data-file-stale, data-file-missing
     #   step 8  →  battery-{soc,discharge,charge}-record-{nem,nsw1,...},
     #              battery-low-soc-{...}
     #   step 9  →  renewable-record-percentage, {wind,solar,hydro,rooftop}-record-mw

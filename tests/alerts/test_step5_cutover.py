@@ -108,19 +108,21 @@ def test_default_dispatcher_fires_sms_on_high_price(tmp_path, monkeypatch):
     d = build_default_dispatcher(
         twilio_client_factory=lambda sid, tok: fake_twilio,
         smtp_factory=lambda host, port: MagicMock(),
-        price_query_fn=lambda ctx: [
+        plugins=[PriceBreachPlugin(query_fn=lambda ctx: [
             (datetime(2026, 5, 7, 18, 25), 'NSW1', 1420.0),
-        ],
+        ])],
     )
     d.run_cycle(db_path='/nonexistent', data_dir=tmp_path)
 
-    fake_twilio.messages.create.assert_called_once()
+    assert fake_twilio.messages.create.call_count == 1
     body = fake_twilio.messages.create.call_args.kwargs['body']
     # Legacy format markers preserved (visible to operators who've
     # been receiving these SMS for months).
     assert 'NSW1' in body
     assert 'HIGH PRICE' in body
     assert '$1420.00' in body or '1420' in body
+    # Step-5 path doesn't produce other SMS in this isolated test
+    # because we passed a single-plugin override above.
 
 
 def test_default_dispatcher_extreme_spike_includes_emoji_in_body(tmp_path, monkeypatch):
@@ -134,9 +136,9 @@ def test_default_dispatcher_extreme_spike_includes_emoji_in_body(tmp_path, monke
     d = build_default_dispatcher(
         twilio_client_factory=lambda sid, tok: fake_twilio,
         smtp_factory=lambda host, port: MagicMock(),
-        price_query_fn=lambda ctx: [
+        plugins=[PriceBreachPlugin(query_fn=lambda ctx: [
             (datetime(2026, 5, 7, 18, 25), 'SA1', 14200.0),
-        ],
+        ])],
     )
     d.run_cycle(db_path='/nonexistent', data_dir=tmp_path)
     body = fake_twilio.messages.create.call_args.kwargs['body']
@@ -155,9 +157,9 @@ def test_default_dispatcher_does_nothing_when_no_alerts(tmp_path, monkeypatch):
     d = build_default_dispatcher(
         twilio_client_factory=lambda sid, tok: fake_twilio,
         smtp_factory=lambda host, port: MagicMock(),
-        price_query_fn=lambda ctx: [
+        plugins=[PriceBreachPlugin(query_fn=lambda ctx: [
             (datetime(2026, 5, 7, 18, 25), 'NSW1', 80.0),  # normal price
-        ],
+        ])],
     )
     d.run_cycle(db_path='/nonexistent', data_dir=tmp_path)
     fake_twilio.messages.create.assert_not_called()
