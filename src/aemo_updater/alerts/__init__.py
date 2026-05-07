@@ -28,6 +28,7 @@ from .plugins.new_duid import NewDuidPlugin
 from .plugins.price_breach import PriceBreachPlugin
 from .plugins.renewable_records import RenewableRecordsPlugin
 from .routing import ALERT_ROUTING, DEFAULT_SINKS
+from .sinks.apns_push import ApnsPushSink
 from .sinks.log import LogSink
 from .sinks.smtp_email import SmtpEmailSink
 from .sinks.twilio_sms import TwilioSmsSink
@@ -68,6 +69,10 @@ def build_default_dispatcher(
                      else TwilioSmsSink(),
             'email': SmtpEmailSink(smtp_factory=smtp_factory) if smtp_factory
                      else SmtpEmailSink(),
+            'apns':  ApnsPushSink(),  # env-driven: APNS_TEAM_ID / KEY_ID /
+                                       # BUNDLE_ID / KEY_PATH / TOKENS_PATH.
+                                       # Disables itself cleanly if any are
+                                       # missing.
         }
     if plugins is None:
         plugins = [

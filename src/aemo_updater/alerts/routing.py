@@ -11,20 +11,22 @@ from __future__ import annotations
 
 
 ALERT_ROUTING: dict[str, list[str]] = {
-    # ── Steps 4-5 (PriceBreachPlugin) ─────────────────────────────────
-    # Flipped to ['sms', 'log'] at step 5, alongside deletion of the
-    # legacy collectors/twilio_price_alerts.py module so SMS isn't
-    # duplicated. iOS push will be added at Phase B as a third entry
-    # for the high-breach + extreme-spike + recovery IDs.
-    'spot-price-high-breach':   ['sms', 'log'],
-    'spot-price-extreme-spike': ['sms', 'log'],
-    'spot-price-recovery':      ['sms', 'log'],
+    # ── Steps 4-5 + Phase B (PriceBreachPlugin) ───────────────────────
+    # Step 5 flipped from ['log'] to ['sms', 'log'] (alongside deletion
+    # of the legacy collectors/twilio_price_alerts.py). Phase B added
+    # 'apns' so iOS testers get a lock-screen banner + sound + badge
+    # on every breach.
+    'spot-price-high-breach':   ['sms', 'apns', 'log'],
+    'spot-price-extreme-spike': ['sms', 'apns', 'log'],
+    'spot-price-recovery':      ['sms', 'apns', 'log'],
 
-    # ── Step 6 (NewDuidPlugin) ────────────────────────────────────────
-    # Email-only (admin-facing). New DUIDs appear roughly weekly so
-    # SMS would be excessive. Catalogue says iOS could surface this
-    # inline (Phase B); not pushed.
-    'new-duid-detected':        ['email', 'log'],
+    # ── Step 6 + Phase B (NewDuidPlugin) ──────────────────────────────
+    # Step 6: email-only (admin-facing). Phase B adds 'apns' which
+    # delivers as a SILENT push — bumps the iOS app icon badge by 1
+    # without a banner / sound. Tester sees the badge tick up; opens
+    # the app to find what's new. SMS skipped — new DUIDs appear
+    # weekly-ish, would be excessive.
+    'new-duid-detected':        ['email', 'apns', 'log'],
 
     # ── Step 7 (DataFreshnessPlugin) ──────────────────────────────────
     # Stale → admin email (operational). Missing → email + sms because

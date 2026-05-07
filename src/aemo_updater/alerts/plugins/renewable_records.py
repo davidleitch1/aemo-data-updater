@@ -115,9 +115,11 @@ def _default_latest_fn(ctx: AlertContext) -> Optional[dict]:  # pragma: no cover
         ).fetchone()
         rooftop_mw = float(rooftop_row[0] or 0) if rooftop_row else 0.0
 
+        # demand30 is the only demand table the collector maintains;
+        # column is `demand` (NEM-wide load by region — sum to get total).
         demand_row = conn.execute(
-            """SELECT SUM(totaldemand) FROM demand5
-                WHERE settlementdate = (SELECT MAX(settlementdate) FROM demand5)"""
+            """SELECT SUM(demand) FROM demand30
+                WHERE settlementdate = (SELECT MAX(settlementdate) FROM demand30)"""
         ).fetchone()
         demand_mw = float(demand_row[0] or 0) if demand_row else 0.0
 
