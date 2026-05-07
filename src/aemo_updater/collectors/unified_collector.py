@@ -222,67 +222,28 @@ class UnifiedAEMOCollector:
                 f.write(f"{duid}\n")
     
     def _check_new_duids(self, df: pd.DataFrame) -> List[str]:
-        """Check for new DUIDs in dataframe"""
+        """Check for new DUIDs in dataframe.
+
+        Auto-classification (writing rows into `duid_mapping`) happens
+        elsewhere in the collector. This method is the in-memory
+        bookkeeping side: track which DUIDs we've already seen.
+
+        Email alerts moved to `NewDuidPlugin` (step 6 of the alerts
+        plugin migration) — no email send from here any more.
+        """
         if 'duid' not in df.columns:
             return []
-        
+
         current_duids = set(df['duid'].unique())
         new_duids = current_duids - self.known_duids
-        
+
         if new_duids:
-            # Update known DUIDs
             self.known_duids.update(new_duids)
             self._save_known_duids()
-            
-            # Send email alert
-            self._send_new_duid_alert(list(new_duids))
-        
+
         return list(new_duids)
-    
-    def _send_new_duid_alert(self, new_duids: List[str]):
-        """Send email alert for new DUIDs with inferred fuel classification."""
-        if not self.email_alerts_enabled or not self.email_sender:
-            return
 
-        try:
-            # Classify each new DUID
-            classified = []
-            for duid in sorted(new_duids):
-                fuel, confidence = classify_duid_fuel(duid)
-                classified.append((duid, fuel, confidence))
 
-            lines = []
-            for duid, fuel, conf in classified:
-                if fuel != 'Unknown':
-                    lines.append(f"  • {duid}  →  {fuel} ({conf} confidence)")
-                else:
-                    lines.append(f"  • {duid}  →  (unclassified)")
-
-            alert = Alert(
-                title=f"New DUIDs Discovered: {len(new_duids)} new units",
-                message=(
-                    "The following new DUIDs have been discovered in the AEMO data:\n\n"
-                    + "\n".join(lines)
-                ),
-                severity=AlertSeverity.INFO,
-                source="UnifiedCollector",
-                metadata={
-                    "new_duids": new_duids,
-                    "classifications": {d: f for d, f, _ in classified},
-                    "total_known_duids": len(self.known_duids),
-                    "timestamp": datetime.now().isoformat()
-                }
-            )
-
-            success = self.email_sender.send(alert)
-            if success:
-                logger.info(f"Email alert sent for {len(new_duids)} new DUIDs")
-            else:
-                logger.error("Failed to send new DUID email alert")
-
-        except Exception as e:
-            logger.error(f"Error sending new DUID alert: {e}")
-    
     def get_latest_files(self, url: str, pattern: str) -> List[str]:
         """Get latest files from a directory matching pattern"""
         try:

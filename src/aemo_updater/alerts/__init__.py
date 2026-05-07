@@ -21,6 +21,7 @@ from .alert_manager import AlertManager
 from .base_alert import Alert, AlertChannel, AlertSeverity
 from .context import AlertContext
 from .dispatcher import AlertDispatcher
+from .plugins.new_duid import NewDuidPlugin
 from .plugins.price_breach import PriceBreachPlugin
 from .routing import ALERT_ROUTING, DEFAULT_SINKS
 from .sinks.log import LogSink
@@ -65,7 +66,10 @@ def build_default_dispatcher(
                      else SmtpEmailSink(),
         }
     if plugins is None:
-        plugins = [PriceBreachPlugin(query_fn=price_query_fn)]
+        plugins = [
+            PriceBreachPlugin(query_fn=price_query_fn),
+            NewDuidPlugin(),
+        ]
     return AlertDispatcher(
         plugins=plugins,
         sinks=sinks,

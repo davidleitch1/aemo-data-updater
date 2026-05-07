@@ -20,8 +20,13 @@ ALERT_ROUTING: dict[str, list[str]] = {
     'spot-price-extreme-spike': ['sms', 'log'],
     'spot-price-recovery':      ['sms', 'log'],
 
+    # ── Step 6 (NewDuidPlugin) ────────────────────────────────────────
+    # Email-only (admin-facing). New DUIDs appear roughly weekly so
+    # SMS would be excessive. Catalogue says iOS could surface this
+    # inline (Phase B); not pushed.
+    'new-duid-detected':        ['email', 'log'],
+
     # Populated by future steps:
-    #   step 6  →  new-duid-detected
     #   step 7  →  data-file-stale, data-file-missing
     #   step 8  →  battery-{soc,discharge,charge}-record-{nem,nsw1,...},
     #              battery-low-soc-{...}
