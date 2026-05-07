@@ -21,6 +21,8 @@ from .alert_manager import AlertManager
 from .base_alert import Alert, AlertChannel, AlertSeverity
 from .context import AlertContext
 from .dispatcher import AlertDispatcher
+from .plugins.battery_low_soc import BatteryLowSocPlugin
+from .plugins.battery_records import BatteryRecordsPlugin
 from .plugins.data_freshness import DataFreshnessPlugin
 from .plugins.new_duid import NewDuidPlugin
 from .plugins.price_breach import PriceBreachPlugin
@@ -71,6 +73,8 @@ def build_default_dispatcher(
             PriceBreachPlugin(query_fn=price_query_fn),
             NewDuidPlugin(),
             DataFreshnessPlugin(),
+            BatteryRecordsPlugin(),
+            BatteryLowSocPlugin(),
         ]
     return AlertDispatcher(
         plugins=plugins,

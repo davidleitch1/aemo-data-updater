@@ -33,6 +33,23 @@ ALERT_ROUTING: dict[str, list[str]] = {
     'data-file-stale':          ['email', 'log'],
     'data-file-missing':        ['email', 'sms', 'log'],
 
+    # ── Step 8 (BatteryRecordsPlugin + BatteryLowSocPlugin) ──────────
+    # SHADOW MODE: log-only at this step. The standalone
+    # /Users/davidleitch/aemo_production/battery_monitor.py daemon
+    # keeps firing SMS as the source of truth; plugins observe in
+    # parallel for ~24h. Cutover commit (later) flips routing to
+    # ['sms', 'log'] and stops the daemon.
+    **{f'battery-soc-record-{r}':       ['log']
+       for r in ('nem', 'nsw1', 'qld1', 'vic1', 'sa1')},
+    **{f'battery-discharge-record-{r}': ['log']
+       for r in ('nem', 'nsw1', 'qld1', 'vic1', 'sa1')},
+    **{f'battery-charge-record-{r}':    ['log']
+       for r in ('nem', 'nsw1', 'qld1', 'vic1', 'sa1')},
+    **{f'battery-low-soc-{r}':          ['log']
+       for r in ('nsw1', 'qld1', 'vic1', 'sa1')},
+    **{f'battery-low-soc-recovery-{r}': ['log']
+       for r in ('nsw1', 'qld1', 'vic1', 'sa1')},
+
     # Populated by future steps:
     #   step 8  →  battery-{soc,discharge,charge}-record-{nem,nsw1,...},
     #              battery-low-soc-{...}
