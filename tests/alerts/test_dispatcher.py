@@ -93,10 +93,16 @@ def test_alert_context_has_required_fields(tmp_path):
 # ── Routing ──────────────────────────────────────────────────────────
 
 
-def test_routing_table_starts_empty():
-    """At step 2 the routing table is intentionally empty — plugins are
-    wired in later steps. DEFAULT_SINKS catches everything."""
-    assert ALERT_ROUTING == {}
+def test_routing_table_shape():
+    """Routing table grows over the migration; this test only asserts
+    the shape (dict[str, list[str]]) + the always-present DEFAULT_SINKS.
+    Per-step entry assertions live in their own test files
+    (e.g. test_price_breach_plugin.test_routing_table_includes_price_alerts)."""
+    assert isinstance(ALERT_ROUTING, dict)
+    for k, v in ALERT_ROUTING.items():
+        assert isinstance(k, str), f'routing key {k!r} not str'
+        assert isinstance(v, list), f'routing value for {k!r} not list'
+        assert all(isinstance(s, str) for s in v), f'sink names in {k!r} not all str'
     assert DEFAULT_SINKS == ['log']
 
 

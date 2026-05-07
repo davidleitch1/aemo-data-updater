@@ -11,8 +11,17 @@ from __future__ import annotations
 
 
 ALERT_ROUTING: dict[str, list[str]] = {
-    # Populated incrementally as plugins land:
-    #   step 4  →  spot-price-high-breach, spot-price-extreme-spike
+    # ── Step 4 (PriceBreachPlugin) ────────────────────────────────────
+    # Routed to LOG ONLY at this step. The legacy
+    # collectors/twilio_price_alerts.py is still firing SMS for these
+    # events from a separate path; flipping these to ['sms', 'log']
+    # while the legacy path runs would deliver duplicate SMS. Step 5
+    # flips the routing AND deletes the legacy path in the same PR.
+    'spot-price-high-breach':   ['log'],
+    'spot-price-extreme-spike': ['log'],
+    'spot-price-recovery':      ['log'],
+
+    # Populated by future steps:
     #   step 6  →  new-duid-detected
     #   step 7  →  data-file-stale, data-file-missing
     #   step 8  →  battery-{soc,discharge,charge}-record-{nem,nsw1,...},
