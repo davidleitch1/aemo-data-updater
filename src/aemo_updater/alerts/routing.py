@@ -50,6 +50,16 @@ ALERT_ROUTING: dict[str, list[str]] = {
     **{f'battery-low-soc-recovery-{r}': ['log']
        for r in ('nsw1', 'qld1', 'vic1', 'sa1')},
 
+    # ── Step 9 (RenewableRecordsPlugin) ──────────────────────────────
+    # SHADOW MODE: log-only at this step. Standalone gauge daemon
+    # (tmux services:2) keeps firing SMS as source of truth. Cutover
+    # commit later flips to ['sms', 'log'] and stops the daemon.
+    'renewable-record-percentage': ['log'],
+    'wind-record-mw':              ['log'],
+    'solar-record-mw':             ['log'],
+    'hydro-record-mw':             ['log'],
+    'rooftop-solar-record-mw':     ['log'],
+
     # Populated by future steps:
     #   step 8  →  battery-{soc,discharge,charge}-record-{nem,nsw1,...},
     #              battery-low-soc-{...}

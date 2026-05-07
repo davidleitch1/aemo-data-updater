@@ -26,6 +26,7 @@ from .plugins.battery_records import BatteryRecordsPlugin
 from .plugins.data_freshness import DataFreshnessPlugin
 from .plugins.new_duid import NewDuidPlugin
 from .plugins.price_breach import PriceBreachPlugin
+from .plugins.renewable_records import RenewableRecordsPlugin
 from .routing import ALERT_ROUTING, DEFAULT_SINKS
 from .sinks.log import LogSink
 from .sinks.smtp_email import SmtpEmailSink
@@ -75,6 +76,7 @@ def build_default_dispatcher(
             DataFreshnessPlugin(),
             BatteryRecordsPlugin(),
             BatteryLowSocPlugin(),
+            RenewableRecordsPlugin(),
         ]
     return AlertDispatcher(
         plugins=plugins,
