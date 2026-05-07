@@ -25,14 +25,27 @@ class AlertChannel(Enum):
 
 @dataclass
 class Alert:
-    """Alert data structure"""
+    """Alert data structure.
+
+    The `id` and `dedup_key` fields are used by the alerts plugin
+    dispatcher (see docs/alerts_plugin_architecture.md):
+      * `id`        — kebab-case alert identifier matching the catalogue
+                      in docs/alerts.md (e.g. 'spot-price-high-breach').
+                      Used by the routing table to look up sinks.
+      * `dedup_key` — plugin-internal key for rate-limit / armed-state
+                      tracking (e.g. 'price-NSW1'). Opaque to sinks.
+    Both default to None for backwards compatibility with pre-plugin
+    call sites.
+    """
     title: str
     message: str
     severity: AlertSeverity
     source: str  # Which collector/component triggered this
     timestamp: datetime = None
     metadata: Optional[Dict[str, Any]] = None
-    
+    id: Optional[str] = None
+    dedup_key: Optional[str] = None
+
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now()
