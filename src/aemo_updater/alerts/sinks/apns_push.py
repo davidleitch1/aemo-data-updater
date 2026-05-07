@@ -36,12 +36,14 @@ from ..base_alert import Alert, AlertSeverity
 logger = logging.getLogger(__name__)
 
 
-APNS_HOST = 'https://api.push.apple.com'  # production. APNs auth
-                                          # key with 'Sandbox &
-                                          # Production' env covers
-                                          # both — we always post to
-                                          # production for TestFlight
-                                          # + App Store builds.
+APNS_PRODUCTION_HOST = 'https://api.push.apple.com'
+APNS_SANDBOX_HOST    = 'https://api.sandbox.push.apple.com'
+# Whichever environment a token belongs to is set lazily — see
+# `emit()`. We try production first (the common case for TestFlight
+# + App Store users) and fall back to sandbox if APNs returns
+# BadDeviceToken. After the first successful delivery, the
+# environment is cached on the token record so subsequent pushes
+# go straight to the right host.
 
 # When APNs responds with one of these statuses, mark the token
 # inactive — the iOS app uninstalled, reset, or otherwise lost
@@ -49,9 +51,21 @@ APNS_HOST = 'https://api.push.apple.com'  # production. APNs auth
 _TERMINAL_STATUSES = (400, 410)
 
 
+_PRICE_ALERT_IDS = {
+    'spot-price-high-breach',
+    'spot-price-extreme-spike',
+    'spot-price-recovery',
+}
+
+
 def _payload_for_alert(alert: Alert) -> dict:
     """Build the APNs JSON payload for a given Alert. Pure — no side
-    effects. Visible vs silent push depends on alert.id."""
+    effects. Visible vs silent push depends on alert.id.
+
+    Price alerts also carry a `deep_link` block: tapping the
+    notification should land the iOS app on Today tab, 1H view,
+    breaching region. The region comes from `alert.metadata['region']`
+    (set by `PriceBreachPlugin`)."""
     if alert.id == 'new-duid-detected':
         # Silent push: no banner, no sound, just bumps the badge.
         return {'aps': {'content-available': 1, 'badge': 1}}
@@ -70,7 +84,18 @@ def _payload_for_alert(alert: Alert) -> dict:
     # have requested the 'critical' permission.
     if alert.id == 'spot-price-extreme-spike':
         aps['interruption-level'] = 'critical'
-    return {'aps': aps}
+    payload: dict = {'aps': aps}
+
+    # Deep-link target — only meaningful for the price alert family.
+    if alert.id in _PRICE_ALERT_IDS:
+        region = (alert.metadata or {}).get('region')
+        if region:
+            payload['deep_link'] = {
+                'tab':    'today',
+                'region': region,
+                'period': '1h',
+            }
+    return payload
 
 
 def _default_jwt_fn(team_id: str, key_id: str, key_path: Path) -> Callable[[], str]:  # pragma: no cover
@@ -176,30 +201,62 @@ class ApnsPushSink:
         }
 
         deactivated: list[str] = []
+        env_updated = False
         for token, info in tokens.items():
             if not info.get('active', True):
                 continue
-            url = f'{APNS_HOST}/3/device/{token}'
+            # Try the environment we already know works; default to
+            # production for new tokens.
+            preferred = info.get('environment', 'production')
+            host = APNS_PRODUCTION_HOST if preferred == 'production' else APNS_SANDBOX_HOST
             try:
-                status, body_text = self.http_post_fn(url, headers_template, body)
+                status, body_text = self.http_post_fn(
+                    f'{host}/3/device/{token}', headers_template, body,
+                )
             except Exception:
                 logger.exception('ApnsPushSink: post to %s failed', token[:8])
                 continue
+
+            if 200 <= status < 300:
+                continue  # delivered
+
+            # 400 BadDeviceToken on production usually means the token
+            # was issued by the sandbox APNs (e.g. Xcode-sideloaded
+            # debug build). Retry the other environment.
+            other_env = 'sandbox' if preferred == 'production' else 'production'
+            other_host = APNS_SANDBOX_HOST if preferred == 'production' else APNS_PRODUCTION_HOST
+            if status == 400 and 'BadDeviceToken' in (body_text or ''):
+                try:
+                    status2, body_text2 = self.http_post_fn(
+                        f'{other_host}/3/device/{token}', headers_template, body,
+                    )
+                except Exception:
+                    logger.exception('ApnsPushSink: fallback to %s also failed', other_env)
+                    continue
+                if 200 <= status2 < 300:
+                    info['environment'] = other_env
+                    env_updated = True
+                    logger.info(
+                        'ApnsPushSink: token %s is %s-issued; cached',
+                        token[:8], other_env,
+                    )
+                    continue
+                # fallback also failed → fall through to terminal handling
+                status, body_text = status2, body_text2
+
             if status in _TERMINAL_STATUSES:
                 logger.info(
                     'ApnsPushSink: deactivating token %s (status %s)',
                     token[:8], status,
                 )
                 deactivated.append(token)
-            elif 200 <= status < 300:
-                pass  # delivered
             else:
                 logger.warning(
                     'ApnsPushSink: unexpected status %s for token %s: %s',
-                    status, token[:8], body_text[:120],
+                    status, token[:8], (body_text or '')[:120],
                 )
 
-        if deactivated:
+        if deactivated or env_updated:
             self._mark_inactive(tokens, deactivated)
 
     # ── Token registry I/O ────────────────────────────────────────────

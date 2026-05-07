@@ -162,6 +162,56 @@ def test_price_alert_payload_visible():
     assert 'content-available' not in aps
 
 
+def test_price_alert_payload_includes_deep_link_to_today():
+    """Tap on a price-breach push should deep-link to Today tab,
+    1H view, breaching region. Region comes from metadata['region']."""
+    a = Alert(
+        title='NSW1 spot $1,420 — breached $1k',
+        message='body',
+        severity=AlertSeverity.CRITICAL,
+        source='price_breach',
+        metadata={'region': 'NSW1'},
+        id='spot-price-high-breach',
+    )
+    payload = _payload_for_alert(a)
+    dl = payload.get('deep_link')
+    assert dl is not None, f'price alert must include deep_link; got {payload}'
+    assert dl.get('tab') == 'today'
+    assert dl.get('region') == 'NSW1'
+    assert dl.get('period') == '1h'
+
+
+def test_extreme_spike_payload_also_has_deep_link():
+    a = Alert(
+        title='SA1 extreme', message='body',
+        severity=AlertSeverity.CRITICAL, source='price_breach',
+        metadata={'region': 'SA1'},
+        id='spot-price-extreme-spike',
+    )
+    payload = _payload_for_alert(a)
+    assert payload['deep_link']['region'] == 'SA1'
+
+
+def test_recovery_payload_also_has_deep_link():
+    a = Alert(
+        title='QLD1 recovered', message='body',
+        severity=AlertSeverity.INFO, source='price_breach',
+        metadata={'region': 'QLD1'},
+        id='spot-price-recovery',
+    )
+    payload = _payload_for_alert(a)
+    assert payload['deep_link']['region'] == 'QLD1'
+
+
+def test_new_duid_payload_no_deep_link():
+    """New DUID is silent + no deep-link target yet (would land on a
+    Browse → Stations 'recently added' view that doesn't exist; defer
+    to a later step)."""
+    payload = _payload_for_alert(_alert('new-duid-detected',
+                                        severity=AlertSeverity.WARNING))
+    assert 'deep_link' not in payload
+
+
 def test_new_duid_payload_is_silent_with_badge():
     payload = _payload_for_alert(_alert('new-duid-detected',
                                         severity=AlertSeverity.WARNING))
