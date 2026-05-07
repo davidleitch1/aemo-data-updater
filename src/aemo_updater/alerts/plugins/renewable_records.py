@@ -66,15 +66,21 @@ METRIC_EMOJI = {
 
 
 def _default_seed_fn(ctx: AlertContext) -> dict:  # pragma: no cover
-    """Try to read existing renewable_records.json (the standalone
-    gauge daemon's state file) as the seed. Falls back to zeros."""
-    legacy_path = ctx.data_dir / 'renewable_records.json'
+    """Read the standalone gauge daemon's per-fuel state file
+    (`renewable_records_calculated.json`) as the seed. The file's
+    shape is `{"all_time": {"renewable_pct": {value, timestamp},
+    "wind_mw": {...}, ...}, "hourly": {...}}`.
+
+    Falls back to zeros if the file is missing or malformed.
+    """
+    legacy_path = ctx.data_dir / 'renewable_records_calculated.json'
     if legacy_path.exists():
         try:
             data = json.loads(legacy_path.read_text())
+            all_time = data.get('all_time', {})
             return {
-                m: {'value': float(data.get(m, {}).get('value', 0)),
-                    'timestamp': data.get(m, {}).get('timestamp')}
+                m: {'value': float(all_time.get(m, {}).get('value', 0)),
+                    'timestamp': all_time.get(m, {}).get('timestamp')}
                 for m in METRICS
             }
         except Exception:
