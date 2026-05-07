@@ -383,19 +383,6 @@ class DuckDBCollector(UnifiedAEMOCollector):
             status = "+" if success else "o"
             logger.info(f"  {data_type}: {status}")
 
-        # Alert plugins run once per cycle, after all merges. The
-        # dispatcher itself isolates exceptions (per-plugin and
-        # per-sink) so a misbehaving alert path never blocks the
-        # collector cycle.
-        if self.dispatcher is not None:
-            try:
-                self.dispatcher.run_cycle(
-                    db_path=str(self.db_path),
-                    data_dir=self.data_path,
-                )
-            except Exception:
-                logger.exception('Alert dispatcher cycle failed')
-
         return results
 
     def _open_conn(self, max_retries=5, base_delay=2.0):
@@ -559,6 +546,22 @@ class DuckDBCollector(UnifiedAEMOCollector):
                 self._close_conn()
                 self._copy_to_readonly()
 
+            # Alert plugins run once per cycle, AFTER the readonly
+            # replica has been refreshed so plugins query a stable
+            # snapshot via the readonly file (avoids DuckDB's "can't
+            # mix read-only + read-write connections to the same
+            # file" error). Dispatcher isolates exceptions itself,
+            # but wrap in try/except for belt-and-braces.
+            if self.dispatcher is not None:
+                try:
+                    readonly_path = self.db_path.parent / 'aemo_readonly.duckdb'
+                    self.dispatcher.run_cycle(
+                        db_path=str(readonly_path),
+                        data_dir=self.data_path,
+                    )
+                except Exception:
+                    logger.exception('Alert dispatcher cycle failed')
+
             logger.info(f"Waiting {update_interval_minutes} minutes for next cycle...")
             time.sleep(update_interval_seconds)
 
@@ -602,6 +605,17 @@ def main():
         finally:
             collector._close_conn()
             collector._copy_to_readonly()
+        # Single-shot also fires the dispatcher cycle so manual runs
+        # exercise the same code path as continuous mode.
+        if collector.dispatcher is not None:
+            try:
+                readonly_path = collector.db_path.parent / 'aemo_readonly.duckdb'
+                collector.dispatcher.run_cycle(
+                    db_path=str(readonly_path),
+                    data_dir=collector.data_path,
+                )
+            except Exception:
+                logger.exception('Alert dispatcher cycle failed')
     else:
         collector.run_continuous()
 

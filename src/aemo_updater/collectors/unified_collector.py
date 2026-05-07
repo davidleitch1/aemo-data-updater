@@ -204,12 +204,8 @@ class UnifiedAEMOCollector:
                 logger.error(f"Failed to configure email alerts: {e}")
                 self.email_alerts_enabled = False
         
-        # Log Twilio alert status
-        if TWILIO_ALERTS_AVAILABLE:
-            logger.info("Twilio price alerts: ENABLED")
-        else:
-            logger.warning(f"Twilio price alerts: DISABLED - {_twilio_import_error or 'import failed'}")
-
+        # Twilio price alerts now run via the alert dispatcher in
+        # DuckDBCollector (step 5 of the alerts plugin migration).
         logger.info("Unified AEMO collector initialized")
     
     def _load_known_duids(self) -> Set[str]:
