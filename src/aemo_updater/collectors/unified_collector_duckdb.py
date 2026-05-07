@@ -26,6 +26,7 @@ import duckdb
 import pandas as pd
 
 from .unified_collector import UnifiedAEMOCollector, classify_duid_fuel
+from ..alerts import build_default_dispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,16 @@ class DuckDBCollector(UnifiedAEMOCollector):
         # Table name mapping (output_files key -> DuckDB table name)
         # They're the same names, but we keep the mapping explicit
         self.table_names = {k: k for k in self.output_files}
+
+        # Alert dispatcher: built once, run_cycle() called once per
+        # merge cycle (see end of collect_all_data). Plugin-based —
+        # see aemo_updater/alerts/__init__.py and
+        # aemo-energy-dashboard2/docs/alerts_plugin_architecture.md.
+        try:
+            self.dispatcher = build_default_dispatcher()
+        except Exception:
+            logger.exception('Failed to build alert dispatcher; alerts disabled')
+            self.dispatcher = None
 
         # Health monitoring state
         self._failure_counts = {k: 0 for k in self.output_files}
@@ -267,16 +278,10 @@ class DuckDBCollector(UnifiedAEMOCollector):
                     new_duids = self._check_new_duids(df)
                     if new_duids:
                         logger.info(f"Discovered {len(new_duids)} new DUIDs")
-                # Check price alerts
-                if data_type == 'prices5' and not df.empty:
-                    try:
-                        from .twilio_price_alerts import check_price_alerts
-                        alert_df = df.copy()
-                        alert_df = alert_df.rename(columns={'regionid': 'REGIONID', 'rrp': 'RRP'})
-                        alert_df = alert_df.set_index('settlementdate')
-                        check_price_alerts(alert_df)
-                    except Exception:
-                        pass
+                # Price alerts now run via the alert dispatcher at the
+                # end of the cycle (see PriceBreachPlugin); the per-row
+                # check that used to live here was moved to a clean
+                # plugin in step 4 of the alerts migration.
             except Exception as e:
                 logger.error(f"Error collecting {data_type}: {e}")
                 results[data_type] = False
@@ -377,6 +382,19 @@ class DuckDBCollector(UnifiedAEMOCollector):
         for data_type, success in results.items():
             status = "+" if success else "o"
             logger.info(f"  {data_type}: {status}")
+
+        # Alert plugins run once per cycle, after all merges. The
+        # dispatcher itself isolates exceptions (per-plugin and
+        # per-sink) so a misbehaving alert path never blocks the
+        # collector cycle.
+        if self.dispatcher is not None:
+            try:
+                self.dispatcher.run_cycle(
+                    db_path=str(self.db_path),
+                    data_dir=self.data_path,
+                )
+            except Exception:
+                logger.exception('Alert dispatcher cycle failed')
 
         return results
 

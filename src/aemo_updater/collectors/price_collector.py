@@ -18,12 +18,9 @@ import requests
 
 from ..config import get_config, get_logger, HTTP_HEADERS
 
-# Import Twilio price alerts
-try:
-    from .twilio_price_alerts import check_price_alerts
-    TWILIO_ALERTS_AVAILABLE = True
-except ImportError as e:
-    TWILIO_ALERTS_AVAILABLE = False
+# Price alerts moved to alert dispatcher in DuckDBCollector
+# (step 5 of the alerts plugin migration). This standalone collector
+# no longer fires SMS — production runs DuckDBCollector.
 
 
 class PriceCollector:
@@ -262,14 +259,8 @@ class PriceCollector:
             self.logger.info("No new records found")
             return False
         
-        # CHECK FOR PRICE ALERTS before logging (exactly as in update_spot.py)
-        if TWILIO_ALERTS_AVAILABLE:
-            try:
-                check_price_alerts(newer_records)
-            except Exception as e:
-                self.logger.error(f"Error checking price alerts: {e}")
-        else:
-            self.logger.debug("Twilio price alerts not available")
+        # Price alerts: see DuckDBCollector — fires via the alert
+        # dispatcher once per cycle after all merges.
         
         # Log new prices
         self.logger.info(f"New prices found for {newer_records.index[0]}:")

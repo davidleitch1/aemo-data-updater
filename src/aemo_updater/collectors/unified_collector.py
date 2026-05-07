@@ -23,14 +23,10 @@ from dotenv import load_dotenv
 from ..alerts.base_alert import Alert, AlertSeverity
 from ..alerts.email_sender import EmailSender
 
-# Import Twilio price alerts
-_twilio_import_error = None
-try:
-    from .twilio_price_alerts import check_price_alerts
-    TWILIO_ALERTS_AVAILABLE = True
-except Exception as e:
-    TWILIO_ALERTS_AVAILABLE = False
-    _twilio_import_error = str(e)
+# Twilio price alerts now run via the alert dispatcher in
+# unified_collector_duckdb (step 5 of the alerts plugin migration).
+# This module's UnifiedAEMOCollector base class no longer fires its
+# own SMS — only DuckDBCollector does.
 
 # Load environment variables
 load_dotenv()
@@ -200,7 +196,8 @@ class UnifiedAEMOCollector:
                     smtp_port=int(os.getenv('SMTP_PORT', '587')),
                     sender_email=os.getenv('ALERT_EMAIL', ''),
                     sender_password=os.getenv('ALERT_PASSWORD', ''),
-                    recipient_email=os.getenv('RECIPIENT_EMAIL', '')
+                    recipient_email=os.getenv('RECIPIENT_EMAIL', ''),
+                    login_email=os.getenv('ALERT_LOGIN')
                 )
                 logger.info("Email alerts configured successfully")
             except Exception as e:
@@ -1587,20 +1584,8 @@ class UnifiedAEMOCollector:
                 ['settlementdate', 'regionid']
             )
 
-            # Check for price alerts (Twilio SMS)
-            if TWILIO_ALERTS_AVAILABLE and not prices5_df.empty:
-                try:
-                    # Convert to format expected by check_price_alerts:
-                    # SETTLEMENTDATE as index, uppercase REGIONID and RRP columns
-                    alert_df = prices5_df.copy()
-                    alert_df = alert_df.rename(columns={
-                        'regionid': 'REGIONID',
-                        'rrp': 'RRP'
-                    })
-                    alert_df = alert_df.set_index('settlementdate')
-                    check_price_alerts(alert_df)
-                except Exception as e:
-                    logger.error(f"Error checking price alerts: {e}")
+            # Price alerts: see DuckDBCollector subclass — fires via
+            # the alert dispatcher once per cycle after all merges.
         except Exception as e:
             logger.error(f"Error collecting 5-min prices: {e}")
             results['prices5'] = False

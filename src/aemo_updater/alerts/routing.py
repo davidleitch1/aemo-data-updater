@@ -11,15 +11,14 @@ from __future__ import annotations
 
 
 ALERT_ROUTING: dict[str, list[str]] = {
-    # ── Step 4 (PriceBreachPlugin) ────────────────────────────────────
-    # Routed to LOG ONLY at this step. The legacy
-    # collectors/twilio_price_alerts.py is still firing SMS for these
-    # events from a separate path; flipping these to ['sms', 'log']
-    # while the legacy path runs would deliver duplicate SMS. Step 5
-    # flips the routing AND deletes the legacy path in the same PR.
-    'spot-price-high-breach':   ['log'],
-    'spot-price-extreme-spike': ['log'],
-    'spot-price-recovery':      ['log'],
+    # ── Steps 4-5 (PriceBreachPlugin) ─────────────────────────────────
+    # Flipped to ['sms', 'log'] at step 5, alongside deletion of the
+    # legacy collectors/twilio_price_alerts.py module so SMS isn't
+    # duplicated. iOS push will be added at Phase B as a third entry
+    # for the high-breach + extreme-spike + recovery IDs.
+    'spot-price-high-breach':   ['sms', 'log'],
+    'spot-price-extreme-spike': ['sms', 'log'],
+    'spot-price-recovery':      ['sms', 'log'],
 
     # Populated by future steps:
     #   step 6  →  new-duid-detected

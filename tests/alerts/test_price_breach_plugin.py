@@ -210,20 +210,12 @@ def test_breach_alerts_have_dedup_key_per_region(tmp_path):
 
 
 def test_routing_table_includes_price_alerts():
-    """All three price-alert IDs must be in ALERT_ROUTING after step 4.
-    During step 4 they route to LOG only — no SMS until step 5."""
+    """All three price-alert IDs must be present in ALERT_ROUTING.
+    Step-specific channel assertions live in
+    test_step5_cutover.test_routing_for_price_alerts_now_includes_sms."""
     assert 'spot-price-high-breach' in ALERT_ROUTING
     assert 'spot-price-extreme-spike' in ALERT_ROUTING
     assert 'spot-price-recovery' in ALERT_ROUTING
-    # Step 4 lands log-only routing to avoid duplicate SMS during
-    # the migration. Step 5 will flip to ['sms', 'log'].
-    for alert_id in ('spot-price-high-breach',
-                     'spot-price-extreme-spike',
-                     'spot-price-recovery'):
-        assert ALERT_ROUTING[alert_id] == ['log'], (
-            f"{alert_id} routing should be ['log'] at step 4; "
-            f"got {ALERT_ROUTING[alert_id]}"
-        )
 
 
 # ── No prices → no alerts ────────────────────────────────────────────
