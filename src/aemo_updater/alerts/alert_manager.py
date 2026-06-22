@@ -50,7 +50,8 @@ class AlertManager:
                     smtp_port=self.config.get('smtp_port', 587),
                     sender_email=self.config.get('alert_email'),
                     sender_password=self.config.get('alert_password'),
-                    recipient_email=self.config.get('recipient_email')
+                    recipient_email=self.config.get('recipient_email'),
+                    login_email=self.config.get('alert_login')
                 )
                 logger.info("Email alerts configured")
             except Exception as e:

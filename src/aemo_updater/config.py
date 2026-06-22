@@ -120,6 +120,7 @@ STATUS_UI_HOST = os.getenv('STATUS_UI_HOST', 'localhost')
 ENABLE_EMAIL_ALERTS = os.getenv('ENABLE_EMAIL_ALERTS', 'false').lower() == 'true'
 ALERT_EMAIL = os.getenv('ALERT_EMAIL', '')
 ALERT_PASSWORD = os.getenv('ALERT_PASSWORD', '')
+ALERT_LOGIN = os.getenv('ALERT_LOGIN', '')
 RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL', '')
 SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
@@ -205,6 +206,7 @@ def get_config():
     config.email_enabled = ENABLE_EMAIL_ALERTS
     config.alert_email = ALERT_EMAIL
     config.alert_password = ALERT_PASSWORD
+    config.alert_login = ALERT_LOGIN
     config.recipient_email = RECIPIENT_EMAIL
     config.smtp_server = SMTP_SERVER
     config.smtp_port = SMTP_PORT

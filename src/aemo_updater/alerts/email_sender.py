@@ -18,7 +18,7 @@ class EmailSender:
     
     def __init__(self, smtp_server: str, smtp_port: int, 
                  sender_email: str, sender_password: str,
-                 recipient_email: str):
+                 recipient_email: str, login_email: str = None):
         """Initialize email sender
         
         Args:
@@ -32,6 +32,7 @@ class EmailSender:
         self.smtp_port = smtp_port
         self.sender_email = sender_email
         self.sender_password = sender_password
+        self.login_email = login_email or sender_email
         self.recipient_email = recipient_email
         
     def send(self, alert: Alert) -> bool:
@@ -58,7 +59,7 @@ class EmailSender:
             # Send email
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
-                server.login(self.sender_email, self.sender_password)
+                server.login(self.login_email, self.sender_password)
                 server.send_message(msg)
                 
             logger.info(f"Email alert sent successfully: {alert.title}")
@@ -77,7 +78,7 @@ class EmailSender:
         try:
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
-                server.login(self.sender_email, self.sender_password)
+                server.login(self.login_email, self.sender_password)
             logger.info("Email connection test successful")
             return True
         except Exception as e:
