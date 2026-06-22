@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -39,6 +39,11 @@ STATE_FILENAME = 'price_breach.json'
 
 VALID_REGIONS = ('NSW1', 'QLD1', 'SA1', 'TAS1', 'VIC1')
 
+# AEMO stores settlementdate as naive AEST (UTC+10, no DST). The
+# incremental watermark `ctx.last_run_at` is UTC-aware, so it must be
+# converted to NEM-naive before comparing against settlementdate.
+_NEM_TZ = timezone(timedelta(hours=10))
+
 
 PriceRow = tuple[datetime, str, float]
 """(settlementdate_nem_naive, regionid, rrp)"""
@@ -52,9 +57,12 @@ def _default_query_fn(ctx: AlertContext) -> list[PriceRow]:  # pragma: no cover
     """
     import duckdb
 
-    last_run_nem = ctx.last_run_at.astimezone(
-        ctx.nem_now.tzinfo or ctx.last_run_at.tzinfo
-    )
+    # Convert the UTC-aware watermark to NEM-naive (UTC+10) so it is
+    # comparable to settlementdate. Using ctx.nem_now.tzinfo here was a
+    # bug: nem_now is already naive (tzinfo=None), so the conversion fell
+    # back to UTC and every cycle re-read ~10h of prices, re-firing the
+    # same high/recovery alerts.
+    last_run_nem = ctx.last_run_at.astimezone(_NEM_TZ).replace(tzinfo=None)
     conn = duckdb.connect(ctx.db_path, read_only=True)
     try:
         rows = conn.execute(
@@ -62,7 +70,7 @@ def _default_query_fn(ctx: AlertContext) -> list[PriceRow]:  # pragma: no cover
                  FROM prices5
                 WHERE settlementdate > ?
                 ORDER BY settlementdate ASC""",
-            [last_run_nem.replace(tzinfo=None)],
+            [last_run_nem],
         ).fetchall()
     finally:
         conn.close()
