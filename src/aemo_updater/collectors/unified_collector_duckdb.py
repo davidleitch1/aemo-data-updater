@@ -38,11 +38,9 @@ class DuckDBCollector(UnifiedAEMOCollector):
     """DuckDB-backed AEMO collector. Inherits all collection methods,
     replaces only the storage layer."""
 
-    # Critical data types that trigger SMS alerts on repeated failure
-    CRITICAL_TYPES = ['prices5', 'scada5']
-    # Consecutive failures before alerting
-    ALERT_THRESHOLD = 3
-    # Minimum time between alerts for the same issue (seconds)
+    # Minimum time between alerts for the same issue (seconds).
+    # Used by lock-conflict and unexpected-error SMS paths;
+    # data-freshness alerts now flow through the alert dispatcher.
     ALERT_COOLDOWN = 3600  # 1 hour
 
     def __init__(self, config=None):
@@ -83,7 +81,6 @@ class DuckDBCollector(UnifiedAEMOCollector):
             self.dispatcher = None
 
         # Health monitoring state
-        self._failure_counts = {k: 0 for k in self.output_files}
         self._last_alert_times = {}  # {issue_key: datetime}
         self._twilio_client = None
 
@@ -487,24 +484,6 @@ class DuckDBCollector(UnifiedAEMOCollector):
         except Exception as e:
             logger.error(f"Failed to auto-insert DUIDs into duid_mapping: {e}")
 
-    def _update_failure_tracking(self, results: Dict[str, bool]):
-        """Update failure counts and send SMS alerts for critical types."""
-        for data_type, success in results.items():
-            if success:
-                self._failure_counts[data_type] = 0
-            else:
-                self._failure_counts[data_type] = self._failure_counts.get(data_type, 0) + 1
-
-        # Check critical types for sustained failures
-        for dt in self.CRITICAL_TYPES:
-            count = self._failure_counts.get(dt, 0)
-            if count >= self.ALERT_THRESHOLD:
-                self._send_collector_alert(
-                    f"AEMO collector: {dt} has failed {count} consecutive cycles "
-                    f"(~{count * 4.5:.0f} min). Data may be stale.",
-                    issue_key=f'failure_{dt}'
-                )
-
     def run_continuous(self, update_interval_minutes: float = 4.5):
         """Run continuous collection, releasing the DB lock between cycles.
 
@@ -529,9 +508,6 @@ class DuckDBCollector(UnifiedAEMOCollector):
                 if any(results.values()):
                     successful_types = [k for k, v in results.items() if v]
                     logger.info(f"Updated: {', '.join(successful_types)}")
-
-                # Track failures and alert on critical issues
-                self._update_failure_tracking(results)
 
             except duckdb.IOException as e:
                 logger.error(f"DuckDB lock error in cycle {cycle_count}: {e}")

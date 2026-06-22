@@ -31,15 +31,16 @@ logger = logging.getLogger(__name__)
 STATE_FILENAME = 'data_freshness_plugin.json'
 
 # Per-table staleness thresholds in MINUTES. AEMO publishes the 5-min
-# tables every 5 min and the 30-min tables every 30 min, so these
-# allow ~3-6 missed publishes before alerting — quiet enough to not
-# fire on transient delays, loud enough to surface real outages.
+# scada/price/transmission tables in batches of ~25 minutes (5 intervals
+# at a time), so a 30-min threshold trips on every slightly slow batch.
+# 45 min gives one missed batch of slack; a 60+ min gap is still a real
+# outage and will fire once the next cycle runs.
 DEFAULT_THRESHOLDS: dict[str, int] = {
-    'prices5':       30,
-    'scada5':        30,
-    'transmission5': 30,
-    'rooftop30':    120,  # 30-min cadence; 4 missed ≈ 2h
-    'demand30':     120,
+    'prices5':        45,
+    'scada5':         45,
+    'transmission5':  45,
+    'rooftop30':     120,  # 30-min cadence; 4 missed ≈ 2h
+    'demand30':      120,
 }
 
 # After firing, suppress re-firing for the same table for this many
