@@ -39,3 +39,9 @@ debug_*.py
 # Data files (should not be in git)
 *.parquet
 data/
+# Backups, env artifacts, transient logs, archives
+*.bak*
+.env-e
+.env.bak
+backfill_log.txt
+*.zip
