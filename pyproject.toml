@@ -17,6 +17,10 @@ dependencies = [
     "numpy>=1.24.0",
     "bokeh>=3.3.0",
     "twilio>=9.6.5",
+    # APNs (iOS push) — Phase B of alerts plugin migration
+    "PyJWT[crypto]>=2.10.0",
+    "cryptography>=41.0.0",
+    "httpx[http2]>=0.27.0",
 ]
 
 [project.optional-dependencies]
