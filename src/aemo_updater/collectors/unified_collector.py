@@ -152,8 +152,9 @@ class UnifiedAEMOCollector:
             'demand': 'http://nemweb.com.au/Reports/Current/Operational_Demand/ACTUAL_HH/',
             'demand_less_snsg': 'http://nemweb.com.au/Reports/Current/Operational_Demand_Less_SNSG/ACTUAL_HH/',
             'predispatch': 'http://www.nemweb.com.au/Reports/Current/Predispatch_Reports/',
+            'bids': 'http://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/',
         }
-        
+
         # Headers for requests
         self.headers = {'User-Agent': 'AEMO Dashboard Data Collector'}
 
@@ -173,6 +174,7 @@ class UnifiedAEMOCollector:
             'demand': set(),
             'demand_less_snsg': set(),
             'bdu5': set(),
+            'bids': set(),
         }
         
         # Collect all data types every cycle (no frequency limiting)
@@ -323,6 +325,69 @@ class UnifiedAEMOCollector:
             logger.error(f"Error downloading {filename}: {e}")
             return pd.DataFrame()
     
+    def _download_zip_csv_bytes(self, url: str, filename: str) -> Optional[bytes]:
+        """Download a NEMWEB zip and return the raw bytes of its inner CSV.
+
+        Unlike download_and_parse_file (which runs the naive MMS splitter), this
+        returns raw CSV bytes so a quote-aware parser can handle free-text fields.
+        """
+        try:
+            response = requests.get(f"{url}{filename}", headers=self.headers, timeout=180)
+            response.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                csv_files = [f for f in z.namelist() if f.lower().endswith('.csv')]
+                if csv_files:
+                    return z.read(csv_files[0])
+            return None
+        except Exception as e:
+            logger.error(f"Error downloading {filename}: {e}")
+            return None
+
+    def collect_bids(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Collect AEMO bid data from CURRENT/Bidmove_Complete.
+
+        Returns (volume_df, price_df): per-interval BIDPEROFFER_D volume bands and
+        per-day BIDDAYOFFER_D price bands. Only new daily files are downloaded, so
+        this is a no-op on most 4.5-min cycles and pulls one ~9 MB zip once a day.
+        """
+        from .bids_parser import parse_bidperoffer, parse_biddayoffer, VOL_COLUMNS, PRICE_COLUMNS
+
+        url = self.current_urls['bids']
+        files = self.get_latest_files(url, 'PUBLIC_BIDMOVE_COMPLETE_')
+        new_files = [f for f in files if f not in self.last_files['bids']]
+
+        if not new_files:
+            logger.debug("No new bid files found")
+            return pd.DataFrame(columns=VOL_COLUMNS), pd.DataFrame(columns=PRICE_COLUMNS)
+
+        logger.info(f"Found {len(new_files)} new bid files")
+
+        vol_frames, price_frames = [], []
+        processed = []
+        for filename in new_files[-self.max_files_per_cycle:]:
+            content = self._download_zip_csv_bytes(url, filename)
+            if content is None:
+                continue
+            vol_frames.append(parse_bidperoffer(content))
+            price_frames.append(parse_biddayoffer(content))
+            processed.append(filename)
+
+        # Only mark files consumed once successfully processed
+        self.last_files['bids'].update(processed)
+
+        vol = pd.concat(vol_frames, ignore_index=True) if vol_frames else pd.DataFrame(columns=VOL_COLUMNS)
+        price = pd.concat(price_frames, ignore_index=True) if price_frames else pd.DataFrame(columns=PRICE_COLUMNS)
+
+        # Guard against overlap across files: keep the latest offer per key.
+        keys = ['settlementdate', 'duid', 'direction']
+        if not vol.empty:
+            vol = vol.sort_values('offerdate').drop_duplicates(keys, keep='last').reset_index(drop=True)
+        if not price.empty:
+            price = price.sort_values('offerdate').drop_duplicates(keys, keep='last').reset_index(drop=True)
+
+        logger.info(f"Collected {len(vol)} bid-volume rows, {len(price)} bid-price rows")
+        return vol, price
+
     def collect_5min_prices(self) -> pd.DataFrame:
         """Collect 5-minute price data"""
         url = self.current_urls['prices5']

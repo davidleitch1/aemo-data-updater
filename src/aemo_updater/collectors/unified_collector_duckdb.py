@@ -56,6 +56,15 @@ class DuckDBCollector(UnifiedAEMOCollector):
         self.conn = None
         logger.info(f"DuckDB database: {self.db_path}")
 
+        # Bids live in a SEPARATE DuckDB file. Bid data updates ~daily, so keeping
+        # it out of the main DB avoids bloating the 4.5-min readonly copy.
+        bids_db_path = self.config.get(
+            'bids_duckdb_path',
+            os.getenv('AEMO_BIDS_DUCKDB_PATH', str(self.data_path / 'bids.duckdb'))
+        )
+        self.bids_db_path = Path(bids_db_path)
+        logger.info(f"Bids DuckDB database: {self.bids_db_path}")
+
         # Verify tables exist (temporary connection)
         self._open_conn()
         tables = {t[0] for t in self.conn.execute("SHOW TABLES").fetchall()}
@@ -369,6 +378,13 @@ class DuckDBCollector(UnifiedAEMOCollector):
             logger.error(f"Error collecting predispatch: {e}")
             results['predispatch'] = False
 
+        # Bids -> separate bids.duckdb (only downloads when a new daily file appears)
+        try:
+            results['bids'] = self.collect_and_store_bids()
+        except Exception as e:
+            logger.error(f"Error collecting bids: {e}")
+            results['bids'] = False
+
         # Summary
         duration = (datetime.now() - start_time).total_seconds()
         success_count = sum(results.values())
@@ -431,6 +447,48 @@ class DuckDBCollector(UnifiedAEMOCollector):
         except Exception as e:
             logger.error(f'Failed to copy read-only replica: {e}')
             # Clean up partial copy
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def collect_and_store_bids(self) -> bool:
+        """Collect bids and merge into the separate bids.duckdb, then refresh
+        its readonly replica. Returns True if any rows were written this cycle.
+
+        Uses its own short-lived connection to bids.duckdb (a different file from
+        self.conn's aemo DB), so it composes with the main cycle without lock
+        contention.
+        """
+        from .bids_store import merge_bids
+
+        vol_df, price_df = self.collect_bids()
+        if (vol_df is None or vol_df.empty) and (price_df is None or price_df.empty):
+            return False
+
+        bids_conn = duckdb.connect(str(self.bids_db_path))
+        try:
+            bids_conn.execute("PRAGMA force_compression='Dictionary'")
+            counts = merge_bids(bids_conn, vol_df, price_df)
+            logger.info(f"DuckDB: merged bids {counts}")
+        finally:
+            bids_conn.close()
+
+        self._copy_bids_to_readonly()
+        return True
+
+    def _copy_bids_to_readonly(self):
+        """Atomically refresh bids_readonly.duckdb for the bids app to read."""
+        readonly_path = self.bids_db_path.parent / 'bids_readonly.duckdb'
+        tmp_path = self.bids_db_path.parent / 'bids_readonly.duckdb.tmp'
+        try:
+            start = time.time()
+            shutil.copy2(str(self.bids_db_path), str(tmp_path))
+            os.rename(str(tmp_path), str(readonly_path))
+            logger.info(f'Copied bids DB to read-only replica in {time.time() - start:.1f}s')
+        except Exception as e:
+            logger.error(f'Failed to copy bids read-only replica: {e}')
             if tmp_path.exists():
                 try:
                     tmp_path.unlink()
