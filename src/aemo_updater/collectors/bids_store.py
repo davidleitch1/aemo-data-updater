@@ -30,12 +30,19 @@ _PRICE_COLS_SQL = ",\n    ".join(
 
 CREATE_VOLUME_SQL = f"CREATE TABLE IF NOT EXISTS bid_volume5 (\n    {_VOL_COLS_SQL}\n)"
 CREATE_PRICE_SQL = f"CREATE TABLE IF NOT EXISTS bid_price_bands (\n    {_PRICE_COLS_SQL}\n)"
+CREATE_DISPATCH_SQL = (
+    "CREATE TABLE IF NOT EXISTS bid_dispatch (\n"
+    "    settlementdate TIMESTAMP,\n    duid VARCHAR,\n    totalcleared DOUBLE\n)"
+)
+
+DISPATCH_KEYS: List[str] = ["settlementdate", "duid"]
 
 
 def ensure_bids_tables(conn) -> None:
-    """Create bid_volume5 and bid_price_bands if they don't exist."""
+    """Create bid_volume5, bid_price_bands and bid_dispatch if they don't exist."""
     conn.execute(CREATE_VOLUME_SQL)
     conn.execute(CREATE_PRICE_SQL)
+    conn.execute(CREATE_DISPATCH_SQL)
 
 
 def _merge(conn, table: str, df: Optional[pd.DataFrame], keys: List[str]) -> int:
@@ -67,3 +74,9 @@ def merge_bids(conn, volume_df: Optional[pd.DataFrame],
         "bid_volume5": _merge(conn, "bid_volume5", volume_df, BID_KEYS),
         "bid_price_bands": _merge(conn, "bid_price_bands", price_df, BID_KEYS),
     }
+
+
+def merge_dispatch(conn, dispatch_df: Optional[pd.DataFrame]) -> int:
+    """Merge per-DUID TOTALCLEARED into bid_dispatch. Returns row count."""
+    ensure_bids_tables(conn)
+    return _merge(conn, "bid_dispatch", dispatch_df, DISPATCH_KEYS)

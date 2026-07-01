@@ -461,17 +461,26 @@ class DuckDBCollector(UnifiedAEMOCollector):
         self.conn's aemo DB), so it composes with the main cycle without lock
         contention.
         """
-        from .bids_store import merge_bids
+        from .bids_store import merge_bids, merge_dispatch
 
         vol_df, price_df = self.collect_bids()
-        if (vol_df is None or vol_df.empty) and (price_df is None or price_df.empty):
+        dispatch_df = self.collect_bid_dispatch()
+
+        have_bids = (vol_df is not None and not vol_df.empty) or (
+            price_df is not None and not price_df.empty
+        )
+        have_dispatch = dispatch_df is not None and not dispatch_df.empty
+        if not have_bids and not have_dispatch:
             return False
 
         bids_conn = duckdb.connect(str(self.bids_db_path))
         try:
             bids_conn.execute("PRAGMA force_compression='Dictionary'")
-            counts = merge_bids(bids_conn, vol_df, price_df)
-            logger.info(f"DuckDB: merged bids {counts}")
+            if have_bids:
+                logger.info(f"DuckDB: merged bids {merge_bids(bids_conn, vol_df, price_df)}")
+            if have_dispatch:
+                n = merge_dispatch(bids_conn, dispatch_df)
+                logger.info(f"DuckDB: merged bid_dispatch {n} rows")
         finally:
             bids_conn.close()
 

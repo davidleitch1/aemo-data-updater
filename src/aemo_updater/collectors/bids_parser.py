@@ -130,3 +130,29 @@ def parse_bidperoffer(content: bytes) -> pd.DataFrame:
 def parse_bids(content: bytes) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Convenience: return (volume_df, price_df) from one CSV's bytes."""
     return parse_bidperoffer(content), parse_biddayoffer(content)
+
+
+DISPATCH_COLUMNS = ["settlementdate", "duid", "totalcleared"]
+
+
+def parse_dispatch_totalcleared(content: bytes) -> pd.DataFrame:
+    """Parse DISPATCH.UNIT_SOLUTION (Next_Day_Dispatch) -> per-DUID TOTALCLEARED.
+
+    Cleared MW for ALL DUIDs (the collector's curtailment5 keeps only wind/solar),
+    used to cap bidstacks at dispatched volume and for the BESS tab. Keeps only
+    non-intervention (INTERVENTION=0) rows.
+    """
+    raw = _read_mms_table(content, "UNIT_SOLUTION")
+    if raw.empty:
+        return pd.DataFrame(columns=DISPATCH_COLUMNS)
+
+    if "INTERVENTION" in raw.columns:
+        raw = raw[raw["INTERVENTION"].astype(str).str.strip().isin(["0", "0.0"])]
+
+    out = pd.DataFrame()
+    out["settlementdate"] = _to_dt(raw["SETTLEMENTDATE"])
+    out["duid"] = raw["DUID"].astype(str).str.strip()
+    out["totalcleared"] = pd.to_numeric(raw["TOTALCLEARED"], errors="coerce").astype("float64")
+    out = out.dropna(subset=["settlementdate", "duid"])
+    out = out.drop_duplicates(["settlementdate", "duid"], keep="last").reset_index(drop=True)
+    return out[DISPATCH_COLUMNS]

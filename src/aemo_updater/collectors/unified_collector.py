@@ -175,6 +175,7 @@ class UnifiedAEMOCollector:
             'demand_less_snsg': set(),
             'bdu5': set(),
             'bids': set(),
+            'bid_dispatch': set(),
         }
         
         # Collect all data types every cycle (no frequency limiting)
@@ -387,6 +388,39 @@ class UnifiedAEMOCollector:
 
         logger.info(f"Collected {len(vol)} bid-volume rows, {len(price)} bid-price rows")
         return vol, price
+
+    def collect_bid_dispatch(self) -> pd.DataFrame:
+        """Collect per-DUID TOTALCLEARED from Next_Day_Dispatch (all DUIDs).
+
+        Separate from curtailment5 (which keeps only wind/solar). Used to cap
+        bidstacks at cleared volume and for the BESS tab. Daily cadence.
+        """
+        from .bids_parser import parse_dispatch_totalcleared, DISPATCH_COLUMNS
+
+        url = self.current_urls['curtailment5']  # CURRENT/Next_Day_Dispatch/
+        files = self.get_latest_files(url, 'PUBLIC_NEXT_DAY_DISPATCH_')
+        new_files = [f for f in files if f not in self.last_files['bid_dispatch']]
+
+        if not new_files:
+            return pd.DataFrame(columns=DISPATCH_COLUMNS)
+
+        frames, processed = [], []
+        for filename in new_files[-self.max_files_per_cycle:]:
+            content = self._download_zip_csv_bytes(url, filename)
+            if content is None:
+                continue
+            frames.append(parse_dispatch_totalcleared(content))
+            processed.append(filename)
+
+        self.last_files['bid_dispatch'].update(processed)
+
+        if not frames:
+            return pd.DataFrame(columns=DISPATCH_COLUMNS)
+        df = pd.concat(frames, ignore_index=True)
+        if not df.empty:
+            df = df.drop_duplicates(['settlementdate', 'duid'], keep='last').reset_index(drop=True)
+        logger.info(f"Collected {len(df)} bid-dispatch (TOTALCLEARED) rows")
+        return df
 
     def collect_5min_prices(self) -> pd.DataFrame:
         """Collect 5-minute price data"""
