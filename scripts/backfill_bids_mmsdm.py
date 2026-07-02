@@ -42,6 +42,10 @@ from aemo_updater.collectors.bids_store import ensure_bids_tables  # noqa: E402
 
 BASE = "https://nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM"
 HEADERS = {"User-Agent": "AEMO Dashboard Data Collector"}
+
+# One reused connection (keep-alive) so downloads never churn ephemeral ports.
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
 VOL_TABLE = "BIDOFFERPERIOD"
 PRICE_TABLE = "BIDDAYOFFER"
 VBANDS = [f"bandavail{i}" for i in range(1, 11)]
@@ -64,7 +68,7 @@ def months(start, end):
 def _download(url, dest, retries=3):
     for a in range(retries):
         try:
-            with requests.get(url, headers=HEADERS, timeout=1800, stream=True) as r:
+            with SESSION.get(url, timeout=1800, stream=True) as r:
                 if r.status_code == 404:
                     return False
                 r.raise_for_status()
@@ -257,8 +261,13 @@ def main():
             nv = ingest_volumes(conn, vcs)
             for p in vcs:
                 os.remove(p)
-        conn.execute("INSERT OR REPLACE INTO bids_backfill_sources VALUES (?, now())", [tag])
-        print(f"{tag}: prices={np_:,} volumes={nv:,} in {time.time()-t0:.0f}s", flush=True)
+        # Only mark done if it actually got data, so a failed month retries on re-run
+        # rather than being silently skipped.
+        if np_ > 0 or nv > 0:
+            conn.execute("INSERT OR REPLACE INTO bids_backfill_sources VALUES (?, now())", [tag])
+            print(f"{tag}: prices={np_:,} volumes={nv:,} in {time.time()-t0:.0f}s", flush=True)
+        else:
+            print(f"{tag}: NO DATA (download/parse failed) — not marked done, will retry", flush=True)
 
     print("CHECKPOINT…", flush=True)
     conn.execute("CHECKPOINT")
