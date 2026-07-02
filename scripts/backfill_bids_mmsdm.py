@@ -147,6 +147,8 @@ def main():
     ap = argparse.ArgumentParser(description="Backfill historical bids from MMSDM")
     ap.add_argument("--db", required=True)
     ap.add_argument("--start", default="2021-07", help="YYYY-MM (default 2021-07)")
+    ap.add_argument("--end", help="YYYY-MM last month to fill (default: month before "
+                    "existing Bidmove coverage in --db)")
     ap.add_argument("--month", help="Only this YYYY-MM (for testing)")
     ap.add_argument("--prices-only", action="store_true")
     args = ap.parse_args()
@@ -163,7 +165,8 @@ def main():
         my, mm = map(int, args.month.split("-"))
         month_iter = [(my, mm)]
     else:
-        month_iter = list(months((sy, sm), _coverage_end(conn)))
+        end = tuple(map(int, args.end.split("-"))) if args.end else _coverage_end(conn)
+        month_iter = list(months((sy, sm), end))
     print(f"MMSDM backfill: {len(month_iter)} months -> {args.db}", flush=True)
 
     tmpdir = tempfile.mkdtemp(prefix="mmsdm_")

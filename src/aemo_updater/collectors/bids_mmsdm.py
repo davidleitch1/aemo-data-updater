@@ -94,6 +94,8 @@ def iter_bidofferperiod_rows(lines: Iterable[str]) -> Iterator[dict]:
             continue
         if idx is None or not line.startswith("D,BIDS,BIDOFFERPERIOD,"):
             continue
+        if ",ENERGY," not in line:  # fast-skip FCAS rows before the expensive split
+            continue
         parts = line.rstrip("\r\n").split(",")
         try:
             if parts[idx["BIDTYPE"]].strip() != "ENERGY":
