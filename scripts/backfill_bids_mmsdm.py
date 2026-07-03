@@ -147,6 +147,9 @@ def ingest_volumes(conn, csv_paths):
     conn.execute("CREATE OR REPLACE TEMP TABLE stgv AS SELECT * FROM bid_volume5 WHERE 1=0")
     out = ["settlementdate", "duid", "direction", "offerdate", "maxavail", "pasaavailability"] + VBANDS
     cols = ", ".join(out)
+    payload = ["offerdate", "maxavail", "pasaavailability"] + VBANDS  # everything but the 3 group keys
+    struct_fields = ", ".join(f"'{c}': {c}" for c in payload)
+    best_cols = ", ".join(f"best.{c}" for c in payload)
     for csv_path in csv_paths:
         hdr = _header_cols(csv_path, VOL_TABLE)
         if not hdr:
@@ -156,26 +159,31 @@ def ingest_volumes(conn, csv_paths):
         g = lambda *ns: next(pos[n] for n in ns if n in pos)  # noqa: E731
         tdate, pid = g("TRADINGDATE", "SETTLEMENTDATE"), g("PERIODID")
         settlement = f"{_ts(tdate)} + to_minutes(240 + 5*try_cast({pid} AS INTEGER))"
-        bands = ", ".join(f"try_cast({g(f'BANDAVAIL{i}')} AS DOUBLE)" for i in range(1, 11))
-        # Stage + dedup THIS split-half alone, then append only its survivors to stgv. A given
-        # (settlementdate,duid,direction) may still straddle both halves, so _merge_stage runs
-        # the final cross-half dedup below — but the big window sort now sees one file, not two,
-        # which (with the spill dir) keeps the 20 GB months inside the memory limit.
-        conn.execute("CREATE OR REPLACE TEMP TABLE stgv_one AS SELECT * FROM bid_volume5 WHERE 1=0")
+        bands = ", ".join(f"try_cast({g(f'BANDAVAIL{i}')} AS DOUBLE) AS bandavail{i}" for i in range(1, 11))
+        proj = (
+            f"SELECT {settlement} AS settlementdate, trim({g('DUID')}) AS duid, "
+            f"{_direction_expr(pos, g('DUID'))} AS direction, "
+            f"{_ts(g('OFFERDATETIME', 'OFFERDATE'))} AS offerdate, "
+            f"try_cast({g('MAXAVAIL')} AS DOUBLE) AS maxavail, "
+            f"try_cast({g('PASAAVAILABILITY')} AS DOUBLE) AS pasaavailability, {bands} "
+            f"FROM {_read_csv(csv_path, ncols)} "
+            f"WHERE c0='D' AND c2='{VOL_TABLE}' AND trim({g('BIDTYPE')})='ENERGY'")
+        # Dedup THIS split-half by streaming the CSV into a hash-aggregate (arg_max keeps the
+        # latest-offer row per key), NOT a window sort. The window over the ~185 GB 2024-07 halves
+        # OOM'd because it must materialise+sort every row; the hash agg holds only ~3.4M groups and
+        # scans the file in a single streaming pass. arg_max over a struct preserves whole-row
+        # integrity on the rare exact-offerdate tie. _merge_stage still runs the final cross-half
+        # dedup + upsert into bid_volume5.
         conn.execute(f"""
-            INSERT INTO stgv_one
-            SELECT {settlement}, trim({g('DUID')}), {_direction_expr(pos, g('DUID'))},
-                   {_ts(g('OFFERDATETIME', 'OFFERDATE'))},
-                   try_cast({g('MAXAVAIL')} AS DOUBLE), try_cast({g('PASAAVAILABILITY')} AS DOUBLE),
-                   {bands}
-            FROM {_read_csv(csv_path, ncols)}
-            WHERE c0='D' AND c2='{VOL_TABLE}' AND trim({g('BIDTYPE')})='ENERGY'
+            INSERT INTO stgv ({cols})
+            SELECT settlementdate, duid, direction, {best_cols}
+            FROM (
+                SELECT settlementdate, duid, direction,
+                       arg_max({{{struct_fields}}}, offerdate) AS best
+                FROM ({proj})
+                GROUP BY settlementdate, duid, direction
+            ) t
         """)
-        conn.execute(
-            f"INSERT INTO stgv ({cols}) SELECT {cols} FROM "
-            f"(SELECT *, row_number() OVER (PARTITION BY settlementdate, duid, direction "
-            f"ORDER BY offerdate DESC) rn FROM stgv_one) WHERE rn=1")
-        conn.execute("DROP TABLE stgv_one")
     return _merge_stage(conn, "stgv", "bid_volume5", ["settlementdate", "duid", "direction"], out)
 
 
