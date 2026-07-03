@@ -145,6 +145,8 @@ def _merge_stage(conn, stg, target, key_cols, out_cols):
 
 def ingest_volumes(conn, csv_paths):
     conn.execute("CREATE OR REPLACE TEMP TABLE stgv AS SELECT * FROM bid_volume5 WHERE 1=0")
+    out = ["settlementdate", "duid", "direction", "offerdate", "maxavail", "pasaavailability"] + VBANDS
+    cols = ", ".join(out)
     for csv_path in csv_paths:
         hdr = _header_cols(csv_path, VOL_TABLE)
         if not hdr:
@@ -155,8 +157,13 @@ def ingest_volumes(conn, csv_paths):
         tdate, pid = g("TRADINGDATE", "SETTLEMENTDATE"), g("PERIODID")
         settlement = f"{_ts(tdate)} + to_minutes(240 + 5*try_cast({pid} AS INTEGER))"
         bands = ", ".join(f"try_cast({g(f'BANDAVAIL{i}')} AS DOUBLE)" for i in range(1, 11))
+        # Stage + dedup THIS split-half alone, then append only its survivors to stgv. A given
+        # (settlementdate,duid,direction) may still straddle both halves, so _merge_stage runs
+        # the final cross-half dedup below — but the big window sort now sees one file, not two,
+        # which (with the spill dir) keeps the 20 GB months inside the memory limit.
+        conn.execute("CREATE OR REPLACE TEMP TABLE stgv_one AS SELECT * FROM bid_volume5 WHERE 1=0")
         conn.execute(f"""
-            INSERT INTO stgv
+            INSERT INTO stgv_one
             SELECT {settlement}, trim({g('DUID')}), {_direction_expr(pos, g('DUID'))},
                    {_ts(g('OFFERDATETIME', 'OFFERDATE'))},
                    try_cast({g('MAXAVAIL')} AS DOUBLE), try_cast({g('PASAAVAILABILITY')} AS DOUBLE),
@@ -164,7 +171,11 @@ def ingest_volumes(conn, csv_paths):
             FROM {_read_csv(csv_path, ncols)}
             WHERE c0='D' AND c2='{VOL_TABLE}' AND trim({g('BIDTYPE')})='ENERGY'
         """)
-    out = ["settlementdate", "duid", "direction", "offerdate", "maxavail", "pasaavailability"] + VBANDS
+        conn.execute(
+            f"INSERT INTO stgv ({cols}) SELECT {cols} FROM "
+            f"(SELECT *, row_number() OVER (PARTITION BY settlementdate, duid, direction "
+            f"ORDER BY offerdate DESC) rn FROM stgv_one) WHERE rn=1")
+        conn.execute("DROP TABLE stgv_one")
     return _merge_stage(conn, "stgv", "bid_volume5", ["settlementdate", "duid", "direction"], out)
 
 
@@ -246,6 +257,15 @@ def main():
 
     tmp = args.tmp or tempfile.mkdtemp(prefix="mmsdm_")
     os.makedirs(tmp, exist_ok=True)
+    # Memory guards for the 24 GB box: the split BIDPEROFFER1/2 months stage ~20 GB CSV
+    # each and window-dedup them, which blows the default ~80% limit. Cap the limit, drop
+    # insertion-order buffering, and give DuckDB a spill dir on the big scratch volume.
+    spill = os.path.join(tmp, "duckdb_spill")
+    os.makedirs(spill, exist_ok=True)
+    conn.execute("SET preserve_insertion_order=false")
+    conn.execute("SET memory_limit='16GB'")
+    conn.execute(f"SET temp_directory='{spill}'")
+    conn.execute("SET threads=4")
     for y, m in month_iter:
         tag = f"MMSDM_{y}_{m:02d}"
         if tag in done:
