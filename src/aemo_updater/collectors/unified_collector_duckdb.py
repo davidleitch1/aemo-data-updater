@@ -6,6 +6,9 @@ Subclass of UnifiedAEMOCollector that writes to a DuckDB database
 instead of parquet files. Provides:
   - merge_and_save_duckdb(): DELETE+INSERT pattern (replaces 60-line merge_and_save)
   - collect_30min_scada(): SQL aggregation (replaces full scada5 read into pandas)
+  - collect_30min_trading(): SQL aggregation from prices5/transmission5, replacing
+    the inherited file-pool version that wrote the instantaneous half-hour price
+    instead of the 30-minute average (see that method's docstring)
   - demand_less_snsg: SQL UPDATE (replaces merge+combine_first pattern)
 
 Usage:
@@ -159,18 +162,47 @@ class DuckDBCollector(UnifiedAEMOCollector):
             # (e.g., demand30 table has demand_less_snsg but collector doesn't supply it)
             col_list = ', '.join(df.columns)
 
+            # A column the table has but this df does not must be carried across the
+            # DELETE, or the re-inserted row comes back NULL. demand_less_snsg arrives
+            # on its own AEMO feed and was being wiped every time demand30 re-merged;
+            # collect_30min_demand_less_snsg() only refills new_files[-3:], so the loss
+            # was permanent for everything older. (Found 9-Aug-2026.)
+            table_cols = [r[0] for r in
+                          self.conn.execute(f"DESCRIBE {table_name}").fetchall()]
+            carried = [c for c in table_cols if c not in df.columns]
+
             self.conn.register('_new_data', df)
             try:
                 self.conn.execute('BEGIN TRANSACTION')
 
-                # Delete existing rows matching new data's keys
-                self.conn.execute(f"""
-                    DELETE FROM {table_name}
-                    WHERE ({key_list}) IN (SELECT {key_list} FROM _new_data)
-                """)
+                if carried:
+                    on = ' AND '.join(f'o.{k} = n.{k}' for k in key_columns)
+                    sel_new = ', '.join(f'n.{c}' for c in df.columns)
+                    sel_old = ', '.join(f'o.{c}' for c in carried)
+                    self.conn.execute(f"""
+                        CREATE OR REPLACE TEMP TABLE _merged AS
+                        SELECT {sel_new}, {sel_old}
+                        FROM _new_data n
+                        LEFT JOIN {table_name} o ON {on}
+                    """)
+                    full_list = ', '.join(list(df.columns) + carried)
+                    self.conn.execute(f"""
+                        DELETE FROM {table_name}
+                        WHERE ({key_list}) IN (SELECT {key_list} FROM _merged)
+                    """)
+                    self.conn.execute(
+                        f"INSERT INTO {table_name} ({full_list}) "
+                        f"SELECT {full_list} FROM _merged")
+                    self.conn.execute("DROP TABLE IF EXISTS _merged")
+                else:
+                    # Delete existing rows matching new data's keys
+                    self.conn.execute(f"""
+                        DELETE FROM {table_name}
+                        WHERE ({key_list}) IN (SELECT {key_list} FROM _new_data)
+                    """)
 
-                # Insert new rows into matching columns only
-                self.conn.execute(f"INSERT INTO {table_name} ({col_list}) SELECT {col_list} FROM _new_data")
+                    # Insert new rows into matching columns only
+                    self.conn.execute(f"INSERT INTO {table_name} ({col_list}) SELECT {col_list} FROM _new_data")
 
                 self.conn.execute('COMMIT')
 
@@ -186,6 +218,83 @@ class DuckDBCollector(UnifiedAEMOCollector):
         except Exception as e:
             logger.error(f"Error merging to DuckDB table {table_name}: {e}")
             return False
+
+    # Recompute this many hours of 30-min endpoints each cycle, so an endpoint
+    # self-heals as soon as a late-arriving 5-min interval completes its window.
+    TRADING_LOOKBACK_HOURS = 6
+
+    MAIN_REGIONS = ('NSW1', 'QLD1', 'SA1', 'TAS1', 'VIC1')
+
+    def collect_30min_trading(self) -> Dict[str, pd.DataFrame]:
+        """Aggregate prices30 and transmission30 from the 5-min DuckDB tables.
+
+        Overrides the inherited file-pool implementation, which derived its 30-min
+        endpoints from whatever 5-min intervals happened to be in the last-20-files
+        pool and averaged them without checking there were six. In steady state that
+        pool holds one new file, so the "average" collapsed to the instantaneous
+        price at the half-hour. Measured on 7-Aug-2026: 233 of 240 prices30 rows
+        equalled the 5-min price at the label, only 1 equalled the true average.
+        Mean absolute error over May-Aug 2026 was $6-11/MWh, worst case $7,587/MWh
+        on a spike interval.
+
+        Aggregating in SQL from prices5/transmission5 -- the pattern
+        collect_30min_scada() already uses -- makes the 30-min value the mean of the
+        six dispatch intervals by construction, which is the settlement definition.
+
+        AEMO convention: the label is the END of the interval, so 12:30 is the mean
+        of 12:05, 12:10, 12:15, 12:20, 12:25, 12:30. Endpoints without all six
+        intervals are skipped rather than written as a partial average.
+        """
+        cutoff = (datetime.now() - timedelta(hours=self.TRADING_LOOKBACK_HOURS)
+                  ).strftime('%Y-%m-%d %H:%M:%S')
+        out = {'prices30': pd.DataFrame(), 'transmission30': pd.DataFrame()}
+
+        try:
+            regions = ", ".join(f"'{r}'" for r in self.MAIN_REGIONS)
+            out['prices30'] = self.conn.execute(f"""
+                SELECT e.endpoint AS settlementdate, s.regionid, AVG(s.rrp) AS rrp
+                FROM (SELECT DISTINCT settlementdate AS endpoint FROM prices5
+                      WHERE EXTRACT(MINUTE FROM settlementdate) IN (0, 30)
+                        AND settlementdate > TIMESTAMP '{cutoff}') e
+                JOIN prices5 s
+                  ON s.settlementdate > e.endpoint - INTERVAL '30 minutes'
+                 AND s.settlementdate <= e.endpoint
+                WHERE s.regionid IN ({regions})
+                GROUP BY e.endpoint, s.regionid
+                HAVING count(DISTINCT s.settlementdate) = 6
+                ORDER BY 1, 2
+            """).df()
+            n_ep = (out['prices30']['settlementdate'].nunique()
+                    if len(out['prices30']) else 0)
+            logger.info(f"prices30: aggregated {len(out['prices30'])} rows from "
+                        f"prices5 ({n_ep} complete 30-min endpoints)")
+        except Exception as e:
+            logger.error(f"Error aggregating prices30 from prices5: {e}")
+
+        try:
+            out['transmission30'] = self.conn.execute(f"""
+                SELECT e.endpoint AS settlementdate, s.interconnectorid,
+                       AVG(s.meteredmwflow) AS meteredmwflow,
+                       AVG(s.mwflow) AS mwflow,
+                       AVG(s.mwlosses) AS mwlosses,
+                       AVG(s.exportlimit) AS exportlimit,
+                       AVG(s.importlimit) AS importlimit
+                FROM (SELECT DISTINCT settlementdate AS endpoint FROM transmission5
+                      WHERE EXTRACT(MINUTE FROM settlementdate) IN (0, 30)
+                        AND settlementdate > TIMESTAMP '{cutoff}') e
+                JOIN transmission5 s
+                  ON s.settlementdate > e.endpoint - INTERVAL '30 minutes'
+                 AND s.settlementdate <= e.endpoint
+                GROUP BY e.endpoint, s.interconnectorid
+                HAVING count(DISTINCT s.settlementdate) = 6
+                ORDER BY 1, 2
+            """).df()
+            logger.info(f"transmission30: aggregated {len(out['transmission30'])} "
+                        f"rows from transmission5")
+        except Exception as e:
+            logger.error(f"Error aggregating transmission30 from transmission5: {e}")
+
+        return out
 
     def collect_30min_scada(self) -> pd.DataFrame:
         """Collect 30-min SCADA by aggregating scada5 in DuckDB.
@@ -259,6 +368,11 @@ class DuckDBCollector(UnifiedAEMOCollector):
         demand_less_snsg via SQL UPDATE instead of parquet merge."""
         logger.info("=== Starting DuckDB update cycle ===")
         start_time = datetime.now()
+
+        # Downloaded files are cached for the length of one cycle only, so a
+        # later cycle always re-reads from nemweb rather than trusting a body
+        # fetched minutes ago.
+        self.clear_file_cache()
 
         results = {}
 
@@ -391,6 +505,9 @@ class DuckDBCollector(UnifiedAEMOCollector):
         total_collections = len(results)
 
         logger.info(f"=== DuckDB update cycle complete in {duration:.1f}s ===")
+        if self._file_cache_hits:
+            logger.info(f"File cache: {self._file_cache_hits} downloads avoided "
+                        f"({len(self._file_cache)} files held)")
         logger.info(f"Results: {success_count}/{total_collections} successful")
         for data_type, success in results.items():
             status = "+" if success else "o"

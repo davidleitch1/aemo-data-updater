@@ -1,0 +1,44 @@
+{
+  "prices5": {
+    "url": "http://nemweb.com.au/Reports/CURRENT/DispatchIS_Reports/",
+    "pattern": "PUBLIC_DISPATCHIS_",
+    "files": [
+      "PUBLIC_DISPATCHIS_202608131325_0000000532431384.zip",
+      "PUBLIC_DISPATCHIS_202608131330_0000000532431882.zip",
+      "PUBLIC_DISPATCHIS_202608131335_0000000532432469.zip"
+    ]
+  },
+  "scada5": {
+    "url": "http://nemweb.com.au/Reports/CURRENT/Dispatch_SCADA/",
+    "pattern": "PUBLIC_DISPATCHSCADA_",
+    "files": [
+      "PUBLIC_DISPATCHSCADA_202608131325_0000000532431389.zip",
+      "PUBLIC_DISPATCHSCADA_202608131330_0000000532431887.zip",
+      "PUBLIC_DISPATCHSCADA_202608131335_0000000532432474.zip"
+    ]
+  },
+  "rooftop": {
+    "url": "http://nemweb.com.au/Reports/CURRENT/ROOFTOP_PV/ACTUAL/",
+    "pattern": "PUBLIC_ROOFTOP_PV_ACTUAL_",
+    "files": [
+      "PUBLIC_ROOFTOP_PV_ACTUAL_SATELLITE_20260813130000_0000000532428955.zip",
+      "PUBLIC_ROOFTOP_PV_ACTUAL_SATELLITE_20260813133000_0000000532432439.zip"
+    ]
+  },
+  "demand": {
+    "url": "http://nemweb.com.au/Reports/Current/Operational_Demand/ACTUAL_HH/",
+    "pattern": "PUBLIC_ACTUAL_OPERATIONAL_DEMAND_HH_",
+    "files": [
+      "PUBLIC_ACTUAL_OPERATIONAL_DEMAND_HH_202608131300_20260813130006.zip",
+      "PUBLIC_ACTUAL_OPERATIONAL_DEMAND_HH_202608131330_20260813133006.zip"
+    ]
+  },
+  "demand_less_snsg": {
+    "url": "http://nemweb.com.au/Reports/Current/Operational_Demand_Less_SNSG/ACTUAL_HH/",
+    "pattern": "PUBLIC_ACTUAL_OPERATIONAL_DEM_LESS_SNSG_HH_",
+    "files": [
+      "PUBLIC_ACTUAL_OPERATIONAL_DEM_LESS_SNSG_HH_202608131230_20260813123006.zip",
+      "PUBLIC_ACTUAL_OPERATIONAL_DEM_LESS_SNSG_HH_202608131300_20260813130006.zip"
+    ]
+  }
+}

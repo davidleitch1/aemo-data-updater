@@ -158,8 +158,29 @@ class UnifiedAEMOCollector:
         # Headers for requests
         self.headers = {'User-Agent': 'AEMO Dashboard Data Collector'}
 
-        # Max files to download per data type per cycle (increase for backfill)
-        self.max_files_per_cycle = self.config.get('max_files_per_cycle', 5)
+        # Max files to download per data type per cycle (increase for backfill).
+        # Four tables read the same DispatchIS zip, so a cycle issues ~4x this many
+        # requests and nemweb starts answering 403 above roughly 20. 12 keeps the
+        # burst under that; longer outages drain over successive cycles via
+        # _select_new_files() rather than in one go.
+        self.max_files_per_cycle = self.config.get('max_files_per_cycle', 12)
+
+        # Bid files are daily ~9 MB zips that parse into millions of rows, unlike the
+        # ~20 KB dispatch files, so they get their own smaller window. An explicit
+        # max_files_per_cycle (as --backfill sets) still applies to them.
+        self.max_bid_files_per_cycle = self.config.get(
+            'max_bid_files_per_cycle',
+            self.max_files_per_cycle if 'max_files_per_cycle' in self.config else 5,
+        )
+
+        # Per-cycle cache of downloaded CSV bodies; see _fetch_csv_bytes.
+        # Setting file_cache_max to 0 disables it exactly -- entries are evicted
+        # as soon as they are stored, so every read falls through to the network
+        # on the same code path. That is the kill switch if it ever misbehaves;
+        # tests/test_collector_regression.py runs the whole collector both ways
+        # and asserts identical output.
+        self.FILE_CACHE_MAX = self.config.get('file_cache_max', self.FILE_CACHE_MAX)
+        self.clear_file_cache()
         
         # Last update timestamps
         self.last_files = {
@@ -266,6 +287,44 @@ class UnifiedAEMOCollector:
             logger.error(f"Error getting files from {url}: {e}")
             return []
     
+    def _select_new_files(self, key: str, files: List[str],
+                          limit: Optional[int] = None) -> List[str]:
+        """Pick the files to process this cycle for `key`, newest first-in-window.
+
+        Replaces the older `new_files[-max:]` + `last_files.update(new_files)`
+        pairing, which processed the newest N but marked *every* unseen file as
+        consumed. Anything past N was then never downloaded and never retried:
+        the 40-file catch-up on 30-Jun-2026 lost exactly 35 dispatch intervals
+        (17:35-20:25), and a 7-file catch-up on 7-Jul lost exactly 2.
+
+        Cold start (nothing seen yet) keeps the old behaviour deliberately: the
+        CURRENT listing holds ~2 days of files the database already has, so the
+        backlog is history rather than a gap and is marked consumed without
+        downloading. Once the set is primed, only the files actually handed back
+        are marked, so a burst larger than the window drains over later cycles
+        instead of being dropped.
+        """
+        limit = limit or self.max_files_per_cycle
+        seen = self.last_files[key]
+        new_files = [f for f in files if f not in seen]
+
+        if not new_files:
+            return []
+
+        batch = new_files[-limit:]
+        if not seen:
+            # First sight of this feed: treat the whole listing as already-held history.
+            seen.update(new_files)
+        else:
+            seen.update(batch)
+            queued = len(new_files) - len(batch)
+            if queued:
+                logger.warning(
+                    f"{key}: {len(new_files)} files pending, processing {len(batch)} "
+                    f"this cycle, {queued} queued for the next"
+                )
+        return batch
+
     def parse_mms_csv(self, content: bytes, table_name: str) -> pd.DataFrame:
         """Parse MMS format CSV content for specific table"""
         try:
@@ -303,29 +362,111 @@ class UnifiedAEMOCollector:
             logger.error(f"Error parsing MMS CSV for {table_name}: {e}")
             return pd.DataFrame()
     
+    # nemweb throttles bursts with 403 and drops connections under load; both are
+    # transient and worth a retry rather than losing the interval.
+    TRANSIENT_STATUS = frozenset({403, 408, 429, 500, 502, 503, 504})
+
+    def _get_with_retry(self, file_url: str, timeout: int, attempts: int = 3):
+        """GET a nemweb URL, retrying the failures nemweb actually throws.
+
+        A single cycle pulls the same DispatchIS zip once per table (prices5,
+        transmission5, curtailment_regional5, bdu5), so a catch-up cycle issues
+        the same file four times within seconds and nemweb answers 403. Bare
+        connection drops (RemoteDisconnected) happen at any time. Both used to be
+        fatal for that interval -- the file was marked consumed and never
+        refetched -- which is where the isolated single-interval holes came from
+        (99 of them in prices5 between 15-May and 13-Aug-2026).
+        """
+        delay = 1.0
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.get(file_url, headers=self.headers, timeout=timeout)
+                if response.status_code in self.TRANSIENT_STATUS and attempt < attempts:
+                    last_error = f"HTTP {response.status_code}"
+                    logger.warning(
+                        f"{last_error} on {file_url.rsplit('/', 1)[-1]}, "
+                        f"retry {attempt}/{attempts - 1} in {delay:.0f}s"
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                response.raise_for_status()
+                return response
+            except requests.exceptions.HTTPError:
+                # Status was already vetted above: reaching here means a status we
+                # do not retry (404 -- the file is gone, as on 13-Aug-2026 04:37)
+                # or a transient one that has used up its attempts.
+                raise
+            except requests.exceptions.RequestException as e:
+                last_error = str(e)
+                if attempt == attempts:
+                    raise
+                logger.warning(
+                    f"{type(e).__name__} on {file_url.rsplit('/', 1)[-1]}, "
+                    f"retry {attempt}/{attempts - 1} in {delay:.0f}s"
+                )
+                time.sleep(delay)
+                delay *= 2
+        raise requests.exceptions.RequestException(last_error)
+
+    # A cycle reads the same DispatchIS zip four times -- PRICE for prices5,
+    # INTERCONNECTORRES for transmission5, and REGIONSUM twice (regional
+    # curtailment and bdu5) -- so every file was fetched four times. At 12 files
+    # per cycle that is 48 requests where 12 suffice, and that burst is what
+    # tripped nemweb rate limiting (403s) on 13-Aug-2026 when the per-cycle
+    # window was widened. Caching by (url, filename) is safe because a nemweb
+    # filename carries a serial and is immutable once published, so one name can
+    # never denote different content.
+    FILE_CACHE_MAX = 400  # bounded: --backfill raises files/cycle a long way
+
+    def clear_file_cache(self):
+        """Drop the cache. Called at the top of each collection cycle."""
+        self._file_cache = {}
+        self._file_cache_hits = 0
+
+    def _trim_file_cache(self):
+        while len(self._file_cache) > self.FILE_CACHE_MAX:
+            self._file_cache.pop(next(iter(self._file_cache)))
+
+    def _fetch_csv_bytes(self, url: str, filename: str,
+                         timeout: int = 60) -> Optional[bytes]:
+        """Return the inner CSV of a nemweb zip, from cache when already fetched.
+
+        Only successful fetches are cached. A failure must stay retryable, or one
+        transient error would suppress the file for every later table in the same
+        cycle and turn a partial miss into a whole missing interval.
+        """
+        if not hasattr(self, '_file_cache'):
+            self.clear_file_cache()
+        key = f"{url}{filename}"
+        if key in self._file_cache:
+            self._file_cache_hits += 1
+            return self._file_cache[key]
+
+        response = self._get_with_retry(key, timeout=timeout)
+        content = None
+        with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+            csv_files = [f for f in z.namelist() if f.lower().endswith('.csv')]
+            if csv_files:
+                content = z.read(csv_files[0])
+        if content is not None:
+            self._file_cache[key] = content
+            self._trim_file_cache()
+        return content
+
     def download_and_parse_file(self, url: str, filename: str, table_name: str) -> pd.DataFrame:
         """Download and parse a single file"""
         try:
-            file_url = f"{url}{filename}"
-            logger.debug(f"Downloading {file_url}")
-            
-            response = requests.get(file_url, headers=self.headers, timeout=60)
-            response.raise_for_status()
-            
-            # Process ZIP file
-            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                files = z.namelist()
-                csv_files = [f for f in files if f.endswith('.csv') or f.endswith('.CSV')]
-                
-                if csv_files:
-                    csv_content = z.read(csv_files[0])
-                    return self.parse_mms_csv(csv_content, table_name)
-            
-            return pd.DataFrame()
+            logger.debug(f"Downloading {url}{filename}")
+            content = self._fetch_csv_bytes(url, filename, timeout=60)
+            if content is None:
+                return pd.DataFrame()
+            return self.parse_mms_csv(content, table_name)
         except Exception as e:
             logger.error(f"Error downloading {filename}: {e}")
             return pd.DataFrame()
-    
+
     def _download_zip_csv_bytes(self, url: str, filename: str) -> Optional[bytes]:
         """Download a NEMWEB zip and return the raw bytes of its inner CSV.
 
@@ -333,13 +474,7 @@ class UnifiedAEMOCollector:
         returns raw CSV bytes so a quote-aware parser can handle free-text fields.
         """
         try:
-            response = requests.get(f"{url}{filename}", headers=self.headers, timeout=180)
-            response.raise_for_status()
-            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                csv_files = [f for f in z.namelist() if f.lower().endswith('.csv')]
-                if csv_files:
-                    return z.read(csv_files[0])
-            return None
+            return self._fetch_csv_bytes(url, filename, timeout=180)
         except Exception as e:
             logger.error(f"Error downloading {filename}: {e}")
             return None
@@ -365,7 +500,7 @@ class UnifiedAEMOCollector:
 
         vol_frames, price_frames = [], []
         processed = []
-        for filename in new_files[-self.max_files_per_cycle:]:
+        for filename in new_files[-self.max_bid_files_per_cycle:]:
             content = self._download_zip_csv_bytes(url, filename)
             if content is None:
                 continue
@@ -405,7 +540,7 @@ class UnifiedAEMOCollector:
             return pd.DataFrame(columns=DISPATCH_COLUMNS)
 
         frames, processed = [], []
-        for filename in new_files[-self.max_files_per_cycle:]:
+        for filename in new_files[-self.max_bid_files_per_cycle:]:
             content = self._download_zip_csv_bytes(url, filename)
             if content is None:
                 continue
@@ -428,16 +563,16 @@ class UnifiedAEMOCollector:
         files = self.get_latest_files(url, 'PUBLIC_DISPATCHIS_')
         
         # Get only new files
-        new_files = [f for f in files if f not in self.last_files['prices5']]
-        
+        new_files = self._select_new_files('prices5', files)
+
         if not new_files:
             logger.debug("No new price files found")
             return pd.DataFrame()
-        
+
         logger.info(f"Found {len(new_files)} new price files")
-        
+
         all_data = []
-        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files to avoid overload
+        for filename in new_files:
             df = self.download_and_parse_file(url, filename, 'PRICE')
             
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -459,9 +594,6 @@ class UnifiedAEMOCollector:
                     if not price_df.empty:
                         all_data.append(price_df)
         
-        # Update last files
-        self.last_files['prices5'].update(new_files)
-        
         if all_data:
             combined_df = pd.concat(all_data, ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'regionid'])
@@ -477,16 +609,16 @@ class UnifiedAEMOCollector:
         files = self.get_latest_files(url, 'PUBLIC_DISPATCHSCADA_')
         
         # Get only new files
-        new_files = [f for f in files if f not in self.last_files['scada5']]
-        
+        new_files = self._select_new_files('scada5', files)
+
         if not new_files:
             logger.debug("No new SCADA files found")
             return pd.DataFrame()
-        
+
         logger.info(f"Found {len(new_files)} new SCADA files")
-        
+
         all_data = []
-        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
+        for filename in new_files:
             df = self.download_and_parse_file(url, filename, 'UNIT_SCADA')
             
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -507,9 +639,6 @@ class UnifiedAEMOCollector:
                     if not scada_df.empty:
                         all_data.append(scada_df)
         
-        # Update last files
-        self.last_files['scada5'].update(new_files)
-        
         if all_data:
             combined_df = pd.concat(all_data, ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'duid'])
@@ -525,16 +654,16 @@ class UnifiedAEMOCollector:
         files = self.get_latest_files(url, 'PUBLIC_DISPATCHIS_')
         
         # Get only new files
-        new_files = [f for f in files if f not in self.last_files['transmission5']]
-        
+        new_files = self._select_new_files('transmission5', files)
+
         if not new_files:
             logger.debug("No new transmission files found")
             return pd.DataFrame()
-        
+
         logger.info(f"Found {len(new_files)} new transmission files")
-        
+
         all_data = []
-        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
+        for filename in new_files:
             df = self.download_and_parse_file(url, filename, 'INTERCONNECTORRES')
             
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -574,9 +703,6 @@ class UnifiedAEMOCollector:
                     if not trans_df.empty:
                         all_data.append(trans_df)
         
-        # Update last files
-        self.last_files['transmission5'].update(new_files)
-        
         if all_data:
             combined_df = pd.concat(all_data, ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'interconnectorid'])
@@ -594,7 +720,7 @@ class UnifiedAEMOCollector:
         files = self.get_latest_files(url, 'PUBLIC_NEXT_DAY_DISPATCH_')
 
         # Get only new files
-        new_files = [f for f in files if f not in self.last_files['curtailment5']]
+        new_files = self._select_new_files('curtailment5', files)
 
         if not new_files:
             logger.debug("No new curtailment files found")
@@ -606,11 +732,10 @@ class UnifiedAEMOCollector:
         wind_solar_pattern = re.compile(r'(WF|SF|SOLAR|WIND|PV)', re.IGNORECASE)
 
         all_data = []
-        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
+        for filename in new_files:
             try:
                 file_url = f"{url}{filename}"
-                response = requests.get(file_url, headers=self.headers, timeout=60)
-                response.raise_for_status()
+                response = self._get_with_retry(file_url, timeout=60)
 
                 # Process ZIP file - extract UNIT_SOLUTION data
                 with zipfile.ZipFile(io.BytesIO(response.content)) as z:
@@ -666,9 +791,6 @@ class UnifiedAEMOCollector:
                 logger.error(f"Error processing curtailment file {filename}: {e}")
                 continue
 
-        # Update last files
-        self.last_files['curtailment5'].update(new_files)
-
         if all_data:
             curtail_df = pd.DataFrame(all_data)
             curtail_df['settlementdate'] = pd.to_datetime(curtail_df['settlementdate'], format='%Y/%m/%d %H:%M:%S')
@@ -696,7 +818,7 @@ class UnifiedAEMOCollector:
         files = self.get_latest_files(url, 'PUBLIC_DISPATCHIS_')
 
         # Get only new files
-        new_files = [f for f in files if f not in self.last_files['curtailment_regional5']]
+        new_files = self._select_new_files('curtailment_regional5', files)
 
         if not new_files:
             logger.debug("No new regional curtailment files found")
@@ -705,7 +827,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new files for regional curtailment")
 
         all_data = []
-        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
+        for filename in new_files:
             df = self.download_and_parse_file(url, filename, 'REGIONSUM')
 
             if not df.empty and 'SETTLEMENTDATE' in df.columns:
@@ -754,9 +876,6 @@ class UnifiedAEMOCollector:
                     if not curtail_df.empty:
                         all_data.append(curtail_df)
 
-        # Update last files
-        self.last_files['curtailment_regional5'].update(new_files)
-
         if all_data:
             combined_df = pd.concat(all_data, ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['settlementdate', 'regionid'])
@@ -787,7 +906,7 @@ class UnifiedAEMOCollector:
         files = self.get_latest_files(url, 'PUBLIC_NEXT_DAY_DISPATCH_')
 
         # Get only new files
-        new_files = [f for f in files if f not in self.last_files['curtailment_duid5']]
+        new_files = self._select_new_files('curtailment_duid5', files)
 
         if not new_files:
             logger.debug("No new DUID curtailment files found")
@@ -796,11 +915,10 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new files for DUID curtailment")
 
         all_data = []
-        for filename in new_files[-self.max_files_per_cycle:]:  # Process last 5 files
+        for filename in new_files:
             try:
                 file_url = f"{url}{filename}"
-                response = requests.get(file_url, headers=self.headers, timeout=60)
-                response.raise_for_status()
+                response = self._get_with_retry(file_url, timeout=60)
 
                 # Process ZIP file - extract UNIT_SOLUTION data
                 with zipfile.ZipFile(io.BytesIO(response.content)) as z:
@@ -842,9 +960,6 @@ class UnifiedAEMOCollector:
                 logger.error(f"Error processing DUID curtailment file {filename}: {e}")
                 continue
 
-        # Update last files
-        self.last_files['curtailment_duid5'].update(new_files)
-
         if all_data:
             curtail_df = pd.DataFrame(all_data)
             curtail_df['settlementdate'] = pd.to_datetime(curtail_df['settlementdate'], format='%Y/%m/%d %H:%M:%S')
@@ -871,8 +986,8 @@ class UnifiedAEMOCollector:
         files = self.get_latest_files(url, 'PUBLIC_TRADINGIS_')
         
         # Get only new files
-        new_files = [f for f in files if f not in self.last_files['trading']]
-        
+        new_files = self._select_new_files('trading', files, limit=20)
+
         if not new_files:
             logger.debug("No new trading files found")
             return {'prices30': pd.DataFrame(), 'transmission30': pd.DataFrame()}
@@ -883,8 +998,7 @@ class UnifiedAEMOCollector:
         price_5min_data = []
         transmission_5min_data = []
         
-        # Process last 20 files to get enough data for aggregation
-        for filename in new_files[-20:]:
+        for filename in new_files:
             # Get price data
             price_df = self.download_and_parse_file(url, filename, 'PRICE')
             if not price_df.empty and 'SETTLEMENTDATE' in price_df.columns:
@@ -933,9 +1047,6 @@ class UnifiedAEMOCollector:
 
                     if not clean_trans_df.empty:
                         transmission_5min_data.append(clean_trans_df)
-        
-        # Update last files
-        self.last_files['trading'].update(new_files)
         
         result = {'prices30': pd.DataFrame(), 'transmission30': pd.DataFrame()}
         
@@ -1219,8 +1330,7 @@ class UnifiedAEMOCollector:
             # Demand files are ZIP containing CSV (not MMS table format)
             try:
                 file_url = f"{url}{filename}"
-                response = requests.get(file_url, headers=self.headers, timeout=60)
-                response.raise_for_status()
+                response = self._get_with_retry(file_url, timeout=60)
 
                 # Extract CSV from ZIP
                 with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
@@ -1329,8 +1439,7 @@ class UnifiedAEMOCollector:
         for filename in files_to_process:
             try:
                 file_url = f"{url}{filename}"
-                response = requests.get(file_url, headers=self.headers, timeout=60)
-                response.raise_for_status()
+                response = self._get_with_retry(file_url, timeout=60)
 
                 with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
                     csv_files = [f for f in zf.namelist() if f.lower().endswith('.csv')]
@@ -1407,7 +1516,7 @@ class UnifiedAEMOCollector:
         url = self.current_urls['prices5']  # Same source as prices/curtailment
         files = self.get_latest_files(url, 'PUBLIC_DISPATCHIS_')
 
-        new_files = [f for f in files if f not in self.last_files['bdu5']]
+        new_files = self._select_new_files('bdu5', files)
 
         if not new_files:
             logger.debug("No new BDU files found")
@@ -1416,7 +1525,7 @@ class UnifiedAEMOCollector:
         logger.info(f"Found {len(new_files)} new files for BDU data")
 
         all_data = []
-        for filename in new_files[-self.max_files_per_cycle:]:
+        for filename in new_files:
             df = self.download_and_parse_file(url, filename, 'REGIONSUM')
 
             if not df.empty and 'SETTLEMENTDATE' in df.columns and 'REGIONID' in df.columns:
@@ -1445,8 +1554,6 @@ class UnifiedAEMOCollector:
 
                 if not bdu_df.empty:
                     all_data.append(bdu_df)
-
-        self.last_files['bdu5'].update(new_files)
 
         if all_data:
             combined_df = pd.concat(all_data, ignore_index=True)
@@ -1561,7 +1668,7 @@ class UnifiedAEMOCollector:
             file_url = url + filename
 
             logger.info(f"Fetching P30 forecast: {filename}")
-            zip_response = requests.get(file_url, headers=self.headers, timeout=60)
+            zip_response = self._get_with_retry(file_url, timeout=60)
 
             with zipfile.ZipFile(io.BytesIO(zip_response.content)) as zf:
                 csv_name = [n for n in zf.namelist() if n.endswith('.CSV')][0]

@@ -13,8 +13,10 @@ venv/
 ENV/
 env/
 
-# Test files
-test_*.py
+# Loose scratch tests at the repo root only. The tests/ directory is tracked --
+# a bare test_*.py rule silently swallowed every file added there, and git add
+# reported success while committing nothing.
+/test_*.py
 
 # IDE
 .vscode/
@@ -45,3 +47,6 @@ data/
 .env.bak
 backfill_log.txt
 *.zip
+# ...except the recorded nemweb fixtures that keep the collector tests offline
+# and deterministic. Public AEMO data, ~77 KB.
+!tests/fixtures/**/*.zip
