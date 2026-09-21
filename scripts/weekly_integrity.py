@@ -37,7 +37,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gap_repair import GapRepairer, STAGE
+from gap_repair import GapRepairer, STAGE, PRIMARY
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = os.environ.get(
@@ -182,6 +182,7 @@ def main():
         log(f'  {t}: {len(before[t])} missing')
 
     inserted, repaired = {}, False
+    after = None
     if total_before and not args.check_only:
         log('Staging from CURRENT / ARCHIVE / MMSDM…')
         r.clear_stage()
@@ -203,6 +204,12 @@ def main():
                     inserted = r.apply()
                     repaired = True
                     log(f'  inserted: {inserted}')
+                    # Re-survey the primary while the lock is still held. The
+                    # read-only replica the survey normally reads is refreshed
+                    # by the collector every few minutes, so surveying it here
+                    # reported every repaired interval as still missing and
+                    # sent a false follow-up (21-Sep-2026).
+                    after = r.survey(TABLES, db=PRIMARY)
                 except Exception as e:
                     log(f'  APPLY ERROR: {e}')
                 finally:
@@ -211,7 +218,8 @@ def main():
                         log('  collector restarted')
         r.clear_stage()
 
-    after = r.survey(TABLES) if repaired else before
+    if after is None:
+        after = before
     total_after = sum(len(v) for v in after.values())
 
     seam_cut = now - timedelta(days=SEAM_DAYS)

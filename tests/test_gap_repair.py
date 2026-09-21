@@ -44,7 +44,7 @@ def main():
     con = duckdb.connect(os.environ['GAP_REPAIR_PRIMARY'])
     con.execute(f"ATTACH '{SRC}' AS src (READ_ONLY)")
     for t in ('prices5', 'scada5', 'transmission5',
-              'prices30', 'transmission30'):
+              'prices30', 'transmission30', 'scada30'):
         con.execute(f"CREATE TABLE {t} AS SELECT * FROM src.{t} "
                     f"WHERE settlementdate BETWEEN TIMESTAMP '{lo}' AND TIMESTAMP '{hi}'")
     con.execute("DETACH src")
@@ -58,9 +58,20 @@ def main():
         'scada5': [datetime.combine(day, datetime.min.time()),
                    datetime.combine(day, datetime.min.time()) + timedelta(hours=6, minutes=40)],
     }
+    # The collector skips a 30-min label it cannot build from six intervals,
+    # so in production the derived label is absent too. Mirror that.
+    DERIVED = {'prices5': ('prices30', 'regionid', 'rrp'),
+               'transmission5': ('transmission30', 'interconnectorid', 'mwflow'),
+               'scada5': ('scada30', 'duid', 'scadavalue')}
+
+    def label_of(ts):
+        m = ts.minute % 30
+        return ts if m == 0 else ts + timedelta(minutes=30 - m)
+
     for t, stamps in holes.items():
         for ts in stamps:
             con.execute(f"DELETE FROM {t} WHERE settlementdate = TIMESTAMP '{ts}'")
+            con.execute(f"DELETE FROM {DERIVED[t][0]} WHERE settlementdate = TIMESTAMP '{label_of(ts)}'")
     con.close()
 
     r = GapRepairer(log=lambda m: print('   ' + str(m)))
@@ -89,6 +100,25 @@ def main():
           midnight not in after['scada5'])
     check('no rows lost elsewhere', sum(len(v) for v in after.values()) == 0,
           str({t: len(v) for t, v in after.items()}))
+
+    # Every derived 30-min label covering a hole must be rebuilt from all six
+    # intervals. scada30 was missing from the rebuild list until 21-Sep-2026.
+    c3 = duckdb.connect(os.environ['GAP_REPAIR_PRIMARY'], read_only=True)
+    for src, (tgt, key, col) in DERIVED.items():
+        for ts in holes[src]:
+            lbl = label_of(ts)
+            n = c3.execute(f"SELECT count(*) FROM {tgt} WHERE settlementdate = TIMESTAMP '{lbl}'").fetchone()[0]
+            bad = c3.execute(f"""
+                SELECT count(*) FROM {tgt} t JOIN (
+                    SELECT {key}, AVG({col}) AS v FROM {src}
+                    WHERE settlementdate > TIMESTAMP '{lbl}' - INTERVAL '30 minutes'
+                      AND settlementdate <= TIMESTAMP '{lbl}'
+                    GROUP BY {key} HAVING count(DISTINCT settlementdate) = 6) s USING ({key})
+                WHERE t.settlementdate = TIMESTAMP '{lbl}' AND abs(t.{col} - s.v) > 1e-6
+            """).fetchone()[0]
+            check(f'{tgt} label {lbl:%d %H:%M} rebuilt from six {src} intervals',
+                  n > 0 and bad == 0, f'rows={n} mismatched={bad}')
+    c3.close()
 
     # Trailing-edge detection: a hole at the newest end must be visible.
     c2 = duckdb.connect(os.environ['GAP_REPAIR_PRIMARY'])

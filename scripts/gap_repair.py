@@ -393,6 +393,8 @@ class GapRepairer:
                  'AVG(s.mwlosses) AS mwlosses, AVG(s.exportlimit) AS exportlimit, '
                  'AVG(s.importlimit) AS importlimit',
                  'meteredmwflow, mwflow, mwlosses, exportlimit, importlimit', ''),
+                ('scada30', 'scada5', 'duid', 'AVG(s.scadavalue) AS scadavalue',
+                 'scadavalue', ''),
             ):
                 if not inserted.get(src):
                     continue
