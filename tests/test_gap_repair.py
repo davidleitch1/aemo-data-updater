@@ -21,7 +21,7 @@ os.environ['GAP_REPAIR_REPLICA'] = f'{SCRATCH}/test.duckdb'
 os.environ['GAP_REPAIR_STAGE'] = f'{SCRATCH}/stage'
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from gap_repair import GapRepairer  # noqa: E402
+from gap_repair import GapRepairer, nem_now  # noqa: E402
 
 SRC = str(Path(os.environ.get('AEMO_DATA_PATH',
     '/Users/davidleitch/aemo_production/data')) / 'aemo_readonly.duckdb')
@@ -35,7 +35,9 @@ def check(label, cond, extra=''):
 
 
 def main():
-    now = datetime.now()
+    # NEM time (UTC+10), not the host clock, which follows daylight saving: the
+    # survey measures its lag allowance against NEM time.
+    now = nem_now()
     # Three recent whole days, safely inside the ARCHIVE window. The extra
     # leading day keeps the midnight hole interior to the enumeration range.
     hi = (now - timedelta(days=3)).replace(hour=23, minute=55, second=0, microsecond=0)
