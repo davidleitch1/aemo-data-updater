@@ -295,11 +295,12 @@ def upsert_outages(con, detail_rows: Sequence[dict], set_rows: Sequence[dict]) -
     return out
 
 
-def connect_with_retry(path, attempts: int = 5, base_delay: float = 2.0, sleep=time.sleep, log=None):
+def connect_with_retry(path, attempts: int = 5, base_delay: float = 2.0, sleep=time.sleep, log=None,
+                       read_only: bool = False):
     """duckdb.connect with exponential backoff on lock conflicts (several jobs write this file)."""
     for i in range(attempts):
         try:
-            return duckdb.connect(str(path))
+            return duckdb.connect(str(path), read_only=True) if read_only else duckdb.connect(str(path))
         except duckdb.IOException as e:
             if i == attempts - 1:
                 raise
@@ -307,6 +308,20 @@ def connect_with_retry(path, attempts: int = 5, base_delay: float = 2.0, sleep=t
             if log:
                 log(f"constraints DB locked (attempt {i + 1}/{attempts}), retrying in {wait:.0f}s: {e}")
             sleep(wait)
+
+
+def refresh_readonly(db_path) -> Path:
+    """Copy ``db_path`` to constraints_readonly.duckdb beside it, atomically (copy, then rename)."""
+    import shutil
+    db_path = Path(db_path)
+    dst, tmp = db_path.parent / "constraints_readonly.duckdb", db_path.parent / "constraints_readonly.duckdb.tmp"
+    try:
+        shutil.copy2(str(db_path), str(tmp))
+        os.rename(str(tmp), str(dst))
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return dst
 
 
 # ---------------------------------------------------------------- live DispatchIS files
