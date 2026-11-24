@@ -1,0 +1,32 @@
+{
+ "N>>NIL_060_051": {
+  "constraintid": "N>>NIL_060_051",
+  "note": "This limit protects the 330 kV line between Jindera (NSW) and Wodonga (Victoria). It applies with the whole network in service. AEMO assumes the Wagga to Lower Tumut 330 kV line could trip at any moment; if it did, much of its flow would shift onto Jindera–Wodonga within seconds. The equation keeps enough room on Jindera–Wodonga to absorb that shift without exceeding the line's 15-minute rating. Solar and wind farms across the Riverina, south-west NSW and north-west Victoria push power towards this line, so when it binds AEMO turns them down, starting with the cheapest way to free up room. Flow west towards South Australia on Murraylink and Project EnergyConnect takes power away from the line, so more westward flow loosens the limit.",
+  "written_effectivedate": "2026-10-01 00:00:00",
+  "written_fingerprint": "d5cdb6d1e97a"
+ },
+ "N>NIL_94T": {
+  "constraintid": "N>NIL_94T",
+  "note": "This limit protects the 132 kV line between Molong and Orange North in central-west NSW. It applies with the whole network in service and involves no assumed trip: the line reaches its continuous rating in ordinary operation. Solar farms at Molong, Manildra, Parkes, Goonumbla and Jemalong feed power east along this line. When their combined output would push the flow past the rating, AEMO turns them down. Flyers Creek Wind Farm sits on the other side of the line, so its output reduces the loading and has a negative weight.",
+  "written_effectivedate": "2026-03-06 00:00:00",
+  "written_fingerprint": "afcc6fa1728c"
+ },
+ "Q>NIL_LCCP_BCCP": {
+  "constraintid": "Q>NIL_LCCP_BCCP",
+  "note": "This limit protects the 275 kV line between Larcom Creek and Calliope River, near Gladstone. It applies with the whole network in service. AEMO assumes the parallel Bouldercombe to Calliope River 275 kV line could trip; about 54% of its flow would then move onto Larcom Creek–Calliope River. The equation keeps that much room free under the line's emergency rating. Almost all generation in central and north Queensland sends power south through this corridor, so the constraint has terms for 59 units. Aldoga Solar Farm, which connects at Larcom Creek, has the highest weight. Kidston's pumps and battery charging north of the corridor relieve it.",
+  "written_effectivedate": "2026-06-05 00:00:00",
+  "written_fingerprint": "0fc0cc54615d"
+ },
+ "V^^V_NIL_KGTS": {
+  "constraintid": "V^^V_NIL_KGTS",
+  "note": "This is a voltage stability limit for north-west Victoria, not a limit on one line. AEMO's concern is voltage collapse if the Horsham–Murra Warra–Kiamal 220 kV line trips. The limit is a base figure of 280 that AEMO adjusts for the equipment that supports voltage: it rises when the Kerang SVC and the capacitor banks at Kerang and Bendigo are in service and when local load at Wemen and Bendigo is higher, and it falls with the flow already on the Wemen to Koorangie 220 kV line. AEMO subtracts a statistical confidence allowance and a small operating margin. The limit is switched off (set to a very large number) when the Murraylink runback scheme is enabled, which AEMO's term list says is at night. Solar farms at Wemen, Bannerton, Karadoc and Yatpool carry the largest weights. Koorangie battery has a weight of −1, so each MW it discharges offsets a MW of the others.",
+  "written_effectivedate": "2026-10-14 00:00:00",
+  "written_fingerprint": "c8be5b71185f"
+ },
+ "N::N_SDUT_2": {
+  "constraintid": "N::N_SDUT_2",
+  "note": "This is a transient stability limit between the Snowy area and the rest of NSW, and this version applies only while the Upper Tumut to Stockdill 330 kV line is out of service. With that line out, a fault between Yass and South Morang could cause generators to lose synchronism if too much power is flowing north. AEMO sets a fixed limit of 1,200 and subtracts the flows already measured on four 330 kV lines (lines 4, 5, 6 and 61 around Collector, Yass, Canberra and Crookwell). Wind farms near Crookwell and Gullen Range have weights close to 1. Flow north from Victoria counts almost one for one against the limit, flow west on Project EnergyConnect relieves it, and Snowy pumping relieves it. It binds for few hours but in high-priced intervals, which is why its dollar value is large for its energy.",
+  "written_effectivedate": "2026-10-09 00:00:00",
+  "written_fingerprint": "4333bae389e6"
+ }
+}
