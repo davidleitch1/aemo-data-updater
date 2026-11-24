@@ -34,8 +34,10 @@ import pandas as pd
 
 UNIT_TYPES = {"System Strength", "Discretionary", "Unit Zero", "Non-Conformance", "Islanding - Unit"}
 JACCARD_MIN = 0.5          # area membership
-CLUSTER_FACTOR_MIN = 0.07  # unit-set threshold for clustering
-BEHIND_FACTOR_MIN = 0.2    # "units behind" threshold
+CLUSTER_REL_MIN = 0.10     # unit-set threshold for clustering (relative weight within the constraint)
+BEHIND_REL_MIN = 0.25      # "units behind" threshold (max relative weight across the area)
+MIN_NAME_LETTERS = 6
+NAME_MAX = 70
 LAST_DAYS = 365            # ranking window for clustering
 
 CLASS_SQL = ("case when {c} like 'F\\_%' escape '\\' or {c} like 'F-%' then 'fcas' "
@@ -74,8 +76,22 @@ def classify_cause(descr: Optional[str], limittype: Optional[str], cid: str) -> 
     return "Outage"
 
 
+def _fallback_name(descr: Optional[str], cid: str) -> str:
+    d = re.sub(r"\s+", " ", descr or "").strip()
+    d = re.sub(r"^out\s*=\s*nil\s*,?\s*", "", d, flags=re.I).strip()
+    if not d:
+        return cid
+    if len(d) <= NAME_MAX:
+        return d
+    cut = d[:NAME_MAX + 1]
+    sp = cut.rfind(" ", 0, NAME_MAX + 1)
+    return (cut[:sp] if sp > 0 else d[:NAME_MAX]).rstrip(" ,;-")
+
+
 def element_name(descr: Optional[str], cid: str) -> str:
-    """Protected element named in AEMO's constraint description (regex chain from the phase 0 prototype)."""
+    """Protected element named in AEMO's constraint description (regex chain from the phase 0
+    prototype). A parse with fewer than 6 letters, or no parse, falls back to the description
+    (leading 'Out= Nil,' removed, at most 70 characters at a word boundary), then to the ID."""
     d = re.sub(r"\s+", " ", descr or "")
     m = re.search(r"avoid(?:ing)?\s+(?:O/L|overload(?:ing)?)\s*(?:of\s+)?(?:either\s+)?(.+?)"
                   r"(?:\s+on\s+(?:the\s+)?trip|\s+using|\s+for\s+loss|,|\.|$)", d, re.I)
@@ -83,10 +99,12 @@ def element_name(descr: Optional[str], cid: str) -> str:
         m = re.search(r"limit\s+(.+?)\s+(?:flow|to\b|upper|generation)", d, re.I)
     if not m:
         m = re.search(r"(?:upper limit on|loading .* on either)\s+(.+?)\s+(?:generation|less)", d, re.I)
-    if not m:
-        return cid
-    e = re.sub(r"\b(330|275|220|132|110|66)\s*kV\b|\bline\b|#", "", m.group(1), flags=re.I)
-    return re.sub(r"\s+", " ", e).strip(" ,")
+    if m:
+        e = re.sub(r"\b(330|275|220|132|110|66)\s*kV\b|\bline\b|#", "", m.group(1), flags=re.I)
+        e = re.sub(r"\s+", " ", e).strip(" ,")
+        if sum(ch.isalpha() for ch in e) >= MIN_NAME_LETTERS:
+            return e
+    return _fallback_name(descr, cid)
 
 
 def cluster_areas(order: Sequence[str], unit_sets: Dict[str, frozenset]) -> Dict[str, str]:
@@ -211,15 +229,17 @@ def _step_constraint_meta(con) -> None:
     # unit terms of each constraint's latest definition version, units as mapped at its last binding
     d = DIR_SQL.format(f="s.factor", ct="c.constrainttype")
     _x(con, f"""create or replace temp table lterms as
+        select cid, duid, factor, direction, abs(factor) / max(abs(factor)) over (partition by cid) rel
+        from (
         select c.cid, du.duid, s.factor, {d} direction
         from cbase2 c
         join cn.spd_connection_point s on s.genconid = c.cid and s.effectivedate = c.l_eff
              and s.versionno = c.l_ver and s.bidtype = 'ENERGY' and s.factor <> 0
         join du on du.cp = s.connectionpointid and c.last_t > du.start_date
-             and (du.end_date is null or c.last_t <= du.end_date)""")
+             and (du.end_date is null or c.last_t <= du.end_date)) x""")
     sets: Dict[str, set] = {}
     for cid, duid in con.execute(
-            f"select distinct cid, duid from lterms where abs(factor) >= {CLUSTER_FACTOR_MIN}").fetchall():
+            f"select distinct cid, duid from lterms where rel >= {CLUSTER_REL_MIN}").fetchall():
         sets.setdefault(cid, set()).add(duid)
     usets = {k: frozenset(v) for k, v in sets.items()}
     amap = cluster_areas(list(base.cid), usets)
@@ -235,6 +255,8 @@ def _step_constraint_meta(con) -> None:
     area_py = pd.DataFrame({
         "area_id": list(ar.groups.keys()),
         "name": [g.element.iat[0] for _, g in ar],
+        "top_constraintid": [g.cid.iat[0] for _, g in ar],
+        "description": [g.description.iat[0] for _, g in ar],
         "region": [g.region.iat[0] for _, g in ar],
         "limittype": [g.limittype.iat[0] for _, g in ar],
         "n_constraints": [len(g) for _, g in ar]})
@@ -250,19 +272,44 @@ def _step_areas(con) -> None:
         from am.duid_mapping group by 1""")
     _x(con, """create or replace temp table area_units as
         select c.area_id, l.duid, m.site, m.fuel, m.region, m.capacity_mw,
-               max(abs(l.factor)) max_factor, l.direction
+               max(abs(l.factor)) max_factor, max(l.rel) max_rel_weight, l.direction
         from lterms l join cbase3 c on c.cid = l.cid left join dm m on m.duid = l.duid
-        group by 1, 2, 3, 4, 5, 6, 8""")
+        group by 1, 2, 3, 4, 5, 6, 9""")
     _x(con, f"""create or replace temp table area as
         select a.area_id, a.name, a.region, a.limittype, a.n_constraints,
-               coalesce(u.n_units, 0) n_units, coalesce(u.weighted_mw, 0) weighted_mw,
-               coalesce(u.missing, 0) missing_capacity_units
+               coalesce(u.n_units, 0) n_units, coalesce(u.units_mw, 0) units_mw,
+               coalesce(u.weighted_mw, 0) weighted_mw, coalesce(u.missing, 0) missing_capacity_units,
+               a.top_constraintid, a.description
         from area_base a left join (
           select area_id,
-                 count(*) filter (where max_factor >= {BEHIND_FACTOR_MIN}) n_units,
-                 sum(coalesce(capacity_mw, 0) * max_factor) weighted_mw,
+                 count(*) filter (where max_rel_weight >= {BEHIND_REL_MIN}) n_units,
+                 sum(coalesce(capacity_mw, 0)) filter (where max_rel_weight >= {BEHIND_REL_MIN}) units_mw,
+                 sum(coalesce(capacity_mw, 0) * max_rel_weight) weighted_mw,
                  count(*) filter (where capacity_mw is null) missing
           from area_units where direction = 'discharge' group by 1) u on u.area_id = a.area_id""")
+
+
+def _step_area_names(con) -> None:
+    """Area name: units' site names for a small unit-specific area, else the top constraint's element."""
+    df = con.execute(f"""
+        select a.area_id, a.name, a.limittype, a.n_units,
+               coalesce(d.us, 0) us, coalesce(d.n, 0) n
+        from area a left join (select area_id, sum(n_unit_specific) us, sum(n_intervals) n
+                               from area_daily group by 1) d on d.area_id = a.area_id""").df()
+    units = con.execute(f"""select area_id, duid, coalesce(site, duid) site from area_units
+        where direction = 'discharge' and max_rel_weight >= {BEHIND_REL_MIN}
+        order by area_id, max_rel_weight desc, duid""").df()
+    sites = units.groupby("area_id").site.apply(list).to_dict()
+    names = []
+    for r in df.itertuples():
+        nm = r.name
+        if 1 <= r.n_units <= 3 and r.n > 0 and r.us * 2 > r.n and r.area_id in sites:
+            uniq = list(dict.fromkeys(sites[r.area_id]))
+            nm = " + ".join(uniq) + " \u2014 " + (r.limittype or "").lower()
+        names.append((r.area_id, nm))
+    con.register("nm_py", pd.DataFrame(names, columns=["area_id", "nm"]))
+    _x(con, "update area set name = n.nm from nm_py n where area.area_id = n.area_id")
+    con.unregister("nm_py")
 
 
 def _step_daily(con) -> None:
@@ -396,6 +443,7 @@ def build(con, built_at: Optional[datetime] = None) -> Dict[str, int]:
     _step_areas(con)
     _step_daily(con)
     _step_units(con)
+    _step_area_names(con)
     _step_outages(con)
     n_all = con.execute(
         "select count(*) from cn.constraint_binding5 where intervention = 0 and marginalvalue <> 0").fetchone()[0]

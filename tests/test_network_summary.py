@@ -51,12 +51,13 @@ class Scn:
                 self.ins("cn.spd_connection_point", genconid=cid, effectivedate=eff, versionno=ver,
                          connectionpointid=cp, bidtype="ENERGY", factor=f)
 
-    def unit(self, duid, cp=None, cap=100.0, region="NSW1", fuel="Wind", start=datetime(2020, 1, 1), end=None):
+    def unit(self, duid, cp=None, cap=100.0, region="NSW1", fuel="Wind", start=datetime(2020, 1, 1), end=None,
+             site=None):
         cp = cp or "CP_" + duid
         self.ins("cn.dudetailsummary", duid=duid, start_date=start, end_date=end, connectionpointid=cp,
                  regionid=region, dispatchtype="GENERATOR")
         if not self.con.execute("select 1 from am.duid_mapping where duid=?", [duid]).fetchone():
-            self.ins("am.duid_mapping", region=region, **{"site name": "Site " + duid}, owner="o", duid=duid,
+            self.ins("am.duid_mapping", region=region, **{"site name": site or "Site " + duid}, owner="o", duid=duid,
                      capacity_mw=cap, storage_mwh=0.0, fuel=fuel)
 
     def bind(self, cid, t, mv=100.0, eff=V1, ver=1, interv=0):
@@ -206,7 +207,9 @@ def test_element_name_chain():
     assert ns.element_name("Out= Nil avoid overloading Calliope River to Wurdong 275 kV line on trip of X", "C") \
         == "Calliope River to Wurdong"
     assert ns.element_name("limit Molong-Orange North flow to X", "C") == "Molong-Orange North"
-    assert ns.element_name("no pattern here", "CID") == "CID"
+    assert ns.element_name("no pattern here", "CID") == "no pattern here"
+    assert ns.element_name("", "CID") == "CID"
+    assert ns.element_name(None, "CID") == "CID"
 
 
 # ------------------------------------------------------------------ clustering
@@ -224,10 +227,10 @@ def test_cluster_areas_pure():
 def _area_scn():
     s = Scn()
     # B binds most often, A overlaps it, C is disjoint, I is interconnector-only
-    s.constraint("N_A", descr="Out= X, avoid O/L of Elem A on trip", terms={"CP_U1": 0.5, "CP_U2": 0.3, "CP_U3": 0.1})
-    s.constraint("N_B", descr="Out= Y, avoid O/L of Elem B on trip",
-                 terms={"CP_U1": 0.4, "CP_U2": 0.25, "CP_U3": 0.1, "CP_U4": 0.08, "CP_U5": 0.02})
-    s.constraint("N_C", descr="Out= Z, avoid O/L of Elem C on trip", terms={"CP_U9": 0.9})
+    s.constraint("N_A", descr="Out= X, avoid O/L of Element Alpha on trip", terms={"CP_U1": 0.5, "CP_U2": 0.3, "CP_U3": 0.1})
+    s.constraint("N_B", descr="Out= Y, avoid O/L of Element Bravo on trip",
+                 terms={"CP_U1": 0.4, "CP_U2": 0.25, "CP_U3": 0.12, "CP_U4": 0.08, "CP_U5": 0.02})
+    s.constraint("N_C", descr="Out= Z, avoid O/L of Element Charlie on trip", terms={"CP_U9": 0.9})
     s.constraint("N_I", descr="Out= Nil", terms={})
     for u, cap in [("U1", 100), ("U2", 50), ("U3", None), ("U4", 10), ("U5", 10), ("U9", 70)]:
         s.unit(u, cap=cap)
@@ -245,21 +248,89 @@ def test_areas_merge_overlap_keep_disjoint_and_interconnector_alone():
     amap = dict(s.q("select constraintid, area_id from constraint_meta"))
     assert amap == {"N_B": "N_B", "N_A": "N_B", "N_C": "N_C", "N_I": "N_I"}
     areas = {r[0]: r[1:] for r in s.q("select area_id, name, n_constraints, n_units from area")}
-    assert areas["N_B"][0] == "Elem B"            # most frequent constraint names the area
+    assert areas["N_B"][0] == "Element Bravo"            # most frequent constraint names the area
     assert areas["N_B"][1] == 2
     assert areas["N_I"][1:] == (1, 0)
 
 
-def test_units_behind_and_weighted_mw():
+def test_units_behind_units_mw_and_weighted_mw_use_relative_weights():
     s = _area_scn()
-    # N_B discharge units (all '<=', positive factors): U1 max .5 (from N_A), U2 .3, U3 .1 , U4 .08, U5 .02
-    behind = s.q("select n_units, weighted_mw, missing_capacity_units from area where area_id='N_B'")[0]
-    assert behind[0] == 2                                       # |f| >= 0.2: U1, U2
-    assert behind[1] == pytest.approx(100 * 0.5 + 50 * 0.3 + 0 * 0.1 + 10 * 0.08 + 10 * 0.02)
-    assert behind[2] == 1                                       # U3 has no capacity
-    rows = s.q("select duid, max_factor, direction, site from area_units where area_id='N_B' order by duid")
-    assert rows[0] == ("U1", 0.5, "discharge", "Site U1")
-    assert len(rows) == 5
+    # relative weights: N_A U1 1, U2 .6, U3 .2 ; N_B U1 1, U2 .625, U3 .3, U4 .2, U5 .05
+    r = s.q("select n_units, units_mw, weighted_mw, missing_capacity_units from area where area_id='N_B'")[0]
+    assert r[0] == 3                                  # U1, U2, U3 (max rel >= 0.25)
+    assert r[1] == pytest.approx(150.0)               # 100 + 50 + 0 (U3 has no capacity)
+    assert r[2] == pytest.approx(100 * 1 + 50 * 0.625 + 0 * 0.3 + 10 * 0.2 + 10 * 0.05)
+    assert r[3] == 1
+    rows = {r[0]: r[1:] for r in s.q("select duid, max_factor, max_rel_weight, direction, site from area_units "
+                                     "where area_id='N_B'")}
+    assert rows["U1"] == (0.5, 1.0, "discharge", "Site U1")      # raw factor kept
+    assert rows["U2"][1] == pytest.approx(0.625) and len(rows) == 5
+
+
+def test_weights_are_scale_free_and_cluster_set_uses_relative_weight():
+    s = Scn()
+    # N_T: weights scaled x10 and small tail; N_Q on a 1.0 scale. Relative weights: T {A:1, B:.05, C:.05}
+    # -> unit set {A}; Q {A:1, B:.9, C:.9} -> {A, B, C}; Jaccard 1/3 -> separate areas.
+    # (On raw factors >= 0.07 both would be {A, B, C} and merge.)
+    s.constraint("N_T", terms={"CP_A": 10.0, "CP_B": 0.5, "CP_C": 0.5})
+    s.constraint("N_Q", terms={"CP_A": 1.0, "CP_B": 0.9, "CP_C": 0.9})
+    for u in "ABC":
+        s.unit(u)
+    for i in range(3):
+        s.bind("N_T", T0 + i * M)
+    s.bind("N_Q", T0)
+    s.build()
+    amap = dict(s.q("select constraintid, area_id from constraint_meta"))
+    assert amap["N_T"] != amap["N_Q"]
+    rw = {r[0]: r[1] for r in s.q("select duid, max_rel_weight from area_units where area_id='N_T'")}
+    assert rw == {"A": 1.0, "B": pytest.approx(0.05), "C": pytest.approx(0.05)}
+
+
+# ------------------------------------------------------------------ names
+
+def test_element_name_rejects_short_parse_and_falls_back_to_description():
+    assert ns.element_name("Out= Nil, avoid O/L of 80% on trip of X", "CID") == "avoid O/L of 80% on trip of X"
+    long = "Out = NIL, " + "word " * 30
+    got = ns.element_name(long, "CID")
+    assert len(got) <= 70 and got.startswith("word word") and not got.endswith(" ") and "Nil" not in got
+    assert got == ("word " * 14).strip()                    # 69 chars: cut back to the word boundary
+    assert ns.element_name("Out= A-B", "CID") == "Out= A-B"  # only a leading Out= Nil prefix is stripped
+    assert ns.element_name("avoid O/L of Wagga Wagga (818) on trip", "CID") == "Wagga Wagga (818)"   # codes kept
+
+
+def test_area_name_from_sites_for_small_unit_specific_area():
+    s = Scn()
+    s.constraint("N_SS", limittype="System Strength", descr="Out= Nil, something about a farm",
+                 terms={"CP_U1": 1.0, "CP_U2": 1.0, "CP_U3": 0.05})
+    s.unit("U1", site="Mount Emerald")
+    s.unit("U2", site="Mount Emerald")
+    s.unit("U3", site="Elsewhere")
+    s.bind("N_SS", T0)
+    s.build()
+    r = s.q("select name, n_units, top_constraintid, description from area")[0]
+    assert r[0] == "Mount Emerald \u2014 system strength"      # sites de-duplicated; U3 is not behind
+    assert r[1] == 2 and r[2] == "N_SS" and r[3] == "Out= Nil, something about a farm"
+
+
+def test_area_name_falls_back_to_element_when_not_unit_specific_majority_or_too_many_units():
+    s = Scn()
+    # same units: one unit-specific constraint binds once, a thermal one three times -> element name
+    s.constraint("N_US", limittype="System Strength", descr="Out= Nil, Not used", terms={"CP_U1": 1.0})
+    s.constraint("N_TH", descr="Out= X, avoid O/L of Element Delta on trip", terms={"CP_U1": 1.0})
+    s.unit("U1", site="Site One")
+    s.bind("N_US", T0)
+    for i in range(3):
+        s.bind("N_TH", T0 + i * M)
+    # 4 units behind a unit-specific constraint -> element name, not sites
+    s.constraint("N_FOUR", limittype="Discretionary", descr="avoid O/L of Element Echo on trip",
+                 terms={f"CP_V{i}": 1.0 for i in range(4)})
+    for i in range(4):
+        s.unit(f"V{i}")
+    s.bind("N_FOUR", T0)
+    s.build()
+    names = {r[0]: r[1] for r in s.q("select top_constraintid, name from area")}
+    assert names["N_TH"] == "Element Delta"
+    assert names["N_FOUR"] == "Element Echo"
 
 
 # ------------------------------------------------------------------ distinct intervals
