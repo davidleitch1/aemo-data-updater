@@ -7,8 +7,13 @@ files and the two views live here so the history backfill and a later live colle
 share one code path.
 
 Rules:
-  * Every insert is an anti-join on the table key. Existing rows are never changed or
-    deleted; re-running a load is a no-op.
+  * Every interval and definition insert is an anti-join on the table key. Existing rows are
+    never changed or deleted; re-running a load is a no-op.
+  * Three snapshot tables are the exception, because each file restates current state:
+    ``dudetailsummary`` is replaced whole by a newer snapshot (stale END_DATE values would
+    otherwise overlap the new rows and duplicate the date-ranged view join), and the two
+    network-outage tables are upserted per OUTAGEID (revised end times and statuses are
+    picked up; outages absent from the incoming file are kept).
   * Column names are lowercase. Source files are read as text and cast by the schema
     here, inserting by name: a column missing from an old file is NULL, an extra
     column in a new file is ignored.
@@ -19,6 +24,8 @@ Rules:
 from __future__ import annotations
 
 import os
+import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -188,11 +195,11 @@ def _stage(con, target: str, src_cols: Sequence[str], src="_raw", stg="_stg") ->
 
 # ---------------------------------------------------------------- anti-join insert
 
-def insert_new(con, target: str, stg: str = "_stg", key: Optional[Sequence[str]] = None) -> Tuple[int, int]:
-    """Insert rows of staged table ``stg`` not already in ``target`` by key. Columns missing in
-    the stage are NULL. Returns (inserted, already_present)."""
+def _dedup(con, target: str, stg: str, key: Sequence[str]) -> Tuple[int, int]:
+    """Create temp table _dedup from staged ``stg`` (one row per key, all target columns, missing
+    ones NULL) and _new (the rows of _dedup whose key is absent from ``target``).
+    Returns (n_new, n_already_present)."""
     spec = TABLES[target]
-    key = list(key or spec.key)
     have = {r[0] for r in con.execute(f"DESCRIBE {stg}").fetchall()}
     missing_key = [k for k in key if k not in have]
     if missing_key:
@@ -209,12 +216,167 @@ def insert_new(con, target: str, stg: str = "_stg", key: Optional[Sequence[str]]
                 f"WHERE NOT EXISTS (SELECT 1 FROM {target} t WHERE {on})")
     n_src = con.execute("SELECT count(*) FROM _dedup").fetchone()[0]
     n_new = con.execute("SELECT count(*) FROM _new").fetchone()[0]
+    return n_new, n_src - n_new
+
+
+def insert_new(con, target: str, stg: str = "_stg", key: Optional[Sequence[str]] = None) -> Tuple[int, int]:
+    """Insert rows of staged table ``stg`` not already in ``target`` by key. Columns missing in
+    the stage are NULL. Returns (inserted, already_present)."""
+    key = list(key or TABLES[target].key)
+    n_new, n_present = _dedup(con, target, stg, key)
     if n_new:
-        cl = ", ".join(cols)
+        cl = ", ".join(TABLES[target].cols)
         con.execute(f"INSERT INTO {target} ({cl}) SELECT {cl} FROM _new")
     con.execute("DROP TABLE IF EXISTS _dedup")
     con.execute("DROP TABLE IF EXISTS _new")
-    return n_new, n_src - n_new
+    return n_new, n_present
+
+
+# Snapshot tables: None = the incoming file replaces the whole table; otherwise the column
+# whose values present in the incoming data scope which stored rows are replaced.
+SNAPSHOT_SCOPE: Dict[str, Optional[str]] = {
+    "dudetailsummary": None,
+    "network_outagedetail": "outageid",
+    "network_outageconstraintset": "outageid",
+}
+
+
+def replace_staged(con, target: str, stg: str = "_stg") -> Tuple[int, int]:
+    """Replace-on-load for a snapshot table (the caller holds the transaction). Returns
+    (rows whose key was not stored before, rows whose key was). An empty incoming snapshot
+    raises rather than wiping the table."""
+    scope = SNAPSHOT_SCOPE[target]
+    n_new, n_present = _dedup(con, target, stg, TABLES[target].key)
+    if n_new + n_present == 0:
+        raise ValueError(f"{target}: incoming snapshot is empty, not replacing")
+    if scope is None:
+        con.execute(f"DELETE FROM {target}")
+    else:
+        con.execute(f"DELETE FROM {target} WHERE {scope} IN "
+                    f"(SELECT {scope} FROM _dedup WHERE {scope} IS NOT NULL)")
+    cl = ", ".join(TABLES[target].cols)
+    con.execute(f"INSERT INTO {target} ({cl}) SELECT {cl} FROM _dedup")
+    con.execute("DROP TABLE IF EXISTS _dedup")
+    con.execute("DROP TABLE IF EXISTS _new")
+    return n_new, n_present
+
+
+def _stage_rows(con, target: str, rows: Sequence[dict], stg: str = "_stg") -> None:
+    """Stage dict rows (lowercase column names, text or typed values) through the same casts
+    as the CSV path."""
+    rows = [{k.lower(): v for k, v in r.items()} for r in rows]
+    cols = sorted({k for r in rows for k in r})
+    con.execute("CREATE OR REPLACE TEMP TABLE _rawrows (" + ", ".join(f'"{c}" VARCHAR' for c in cols) + ")")
+    con.executemany(f"INSERT INTO _rawrows VALUES ({', '.join('?' for _ in cols)})",
+                    [[None if r.get(c) is None else str(r.get(c)) for c in cols] for r in rows])
+    _stage(con, target, cols, src="_rawrows", stg=stg)
+    con.execute("DROP TABLE IF EXISTS _rawrows")
+
+
+def upsert_outages(con, detail_rows: Sequence[dict], set_rows: Sequence[dict]) -> Dict[str, Tuple[int, int]]:
+    """Apply an outage snapshot (e.g. a PUBLIC_NETWORK file) in one transaction. For each
+    OUTAGEID present in a table's incoming rows, that outage's stored rows in that table are
+    deleted and the incoming ones inserted; outages absent from the incoming data are untouched.
+    Rows are dicts keyed by lowercase column name. Returns {table: (new, already_present)}."""
+    out: Dict[str, Tuple[int, int]] = {}
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for target, rows in (("network_outagedetail", detail_rows), ("network_outageconstraintset", set_rows)):
+            if not rows:
+                out[target] = (0, 0)
+                continue
+            _stage_rows(con, target, rows)
+            out[target] = replace_staged(con, target)
+            con.execute("DROP TABLE IF EXISTS _stg")
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    return out
+
+
+def connect_with_retry(path, attempts: int = 5, base_delay: float = 2.0, sleep=time.sleep, log=None):
+    """duckdb.connect with exponential backoff on lock conflicts (several jobs write this file)."""
+    for i in range(attempts):
+        try:
+            return duckdb.connect(str(path))
+        except duckdb.IOException as e:
+            if i == attempts - 1:
+                raise
+            wait = base_delay * (2 ** i)
+            if log:
+                log(f"constraints DB locked (attempt {i + 1}/{attempts}), retrying in {wait:.0f}s: {e}")
+            sleep(wait)
+
+
+# ---------------------------------------------------------------- live DispatchIS files
+
+def _section(csv_bytes: bytes, table: str) -> Optional[bytes]:
+    """Re-assemble one table's section of a multi-table DispatchIS CSV as a single-table AEMO
+    file (C line, I line, D rows) so it goes through the same reader as an MMSDM file.
+    Returns None when the section has no I line."""
+    i_pre = b"I,DISPATCH," + table.encode() + b","
+    d_pre = b"D,DISPATCH," + table.encode() + b","
+    i_line, d_lines = None, []
+    for line in csv_bytes.splitlines():
+        if line.startswith(i_pre):
+            i_line = line
+        elif line.startswith(d_pre):
+            d_lines.append(line)
+    if i_line is None:
+        return None
+    return b"\n".join([b"C,DISPATCHIS", i_line, *d_lines]) + b"\n"
+
+
+def _has_rows(section: Optional[bytes]) -> bool:
+    return section is not None and section.count(b"\n") > 2
+
+
+def store_dispatchis(con, csv_bytes: bytes) -> dict:
+    """Store one DispatchIS CSV in a single transaction: binding CONSTRAINT rows into
+    constraint_binding5, every LOCAL_PRICE row into local_price5 and, last, the interval's row
+    into constraint_intervals. A file with no CONSTRAINT rows raises and nothing is written.
+    Typing goes through the same staging as the MMSDM loader, so rows are identical in value
+    and type. Returns {binding, local_price, ledger: (inserted, already_present), intervals}."""
+    cons, lp = _section(csv_bytes, "CONSTRAINT"), _section(csv_bytes, "LOCAL_PRICE")
+    if not _has_rows(cons):
+        raise ValueError("DispatchIS file has no CONSTRAINT rows")
+    res: dict = {}
+    with tempfile.TemporaryDirectory(prefix="dis_") as td:
+        cpath, lpath = Path(td) / "data1.csv", Path(td) / "data2.csv"
+        cpath.write_bytes(cons)
+        if _has_rows(lp):
+            lpath.write_bytes(lp)
+        con.execute("BEGIN TRANSACTION")
+        try:
+            src_cols = read_raw(con, [(1, cpath)])
+            have = _stage(con, "constraint_binding5", src_cols)
+            if "intervention" in have:
+                con.execute("UPDATE _stg SET intervention = 0 WHERE intervention IS NULL")
+            else:
+                con.execute("ALTER TABLE _stg ADD COLUMN intervention BIGINT DEFAULT 0")
+            con.execute("CREATE OR REPLACE TEMP TABLE _led AS SELECT settlementdate, count(*) AS n_listed, "
+                        "count(*) FILTER (WHERE coalesce(marginalvalue, 0) <> 0 OR coalesce(violationdegree, 0) <> 0) "
+                        "AS n_binding FROM _stg WHERE intervention = 0 GROUP BY 1")
+            con.execute("CREATE OR REPLACE TEMP TABLE _bind AS SELECT * FROM _stg WHERE "
+                        "coalesce(marginalvalue, 0) <> 0 OR coalesce(violationdegree, 0) <> 0")
+            res["binding"] = insert_new(con, "constraint_binding5", "_bind")
+            if lpath.exists():
+                src_cols = read_raw(con, [(2, lpath)])
+                _stage(con, "local_price5", src_cols)
+                res["local_price"] = insert_new(con, "local_price5", "_stg")
+            else:
+                res["local_price"] = (0, 0)
+            res["intervals"] = [tuple(r) for r in con.execute(
+                "SELECT settlementdate, n_listed, n_binding FROM _led ORDER BY 1").fetchall()]
+            res["ledger"] = insert_new(con, "constraint_intervals", "_led")     # last
+            for t in ("_raw", "_stg", "_led", "_bind"):
+                con.execute(f"DROP TABLE IF EXISTS {t}")
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+    return res
 
 
 # ---------------------------------------------------------------- month loader
@@ -253,7 +415,10 @@ def load_month_table(con, source_table: str, ym: str,
             key = None
             if target == "genconsetinvoke" and "invocation_id" not in src_cols:
                 key = INVOKE_FALLBACK_KEY
-            i, p = insert_new(con, target, "_stg", key)
+            if target in SNAPSHOT_SCOPE:
+                i, p = replace_staged(con, target, "_stg")
+            else:
+                i, p = insert_new(con, target, "_stg", key)
             results.append((target, i, p))
         for part, n in part_counts:
             con.execute("INSERT INTO _loaded VALUES (?, ?, ?, ?, now())", [source_table, ym, int(part), int(n)])
