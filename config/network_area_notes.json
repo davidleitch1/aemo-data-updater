@@ -24,9 +24,9 @@
   "written_fingerprint": "c8be5b71185f"
  },
  "N::N_SDUT_2": {
-  "constraintid": "N::N_SDUT_2",
-  "note": "This is a transient stability limit between the Snowy area and the rest of NSW, and this version applies only while the Upper Tumut to Stockdill 330 kV line is out of service. With that line out, a fault between Yass and South Morang could cause generators to lose synchronism if too much power is flowing north. AEMO sets a fixed limit of 1,200 and subtracts the flows already measured on four 330 kV lines (lines 4, 5, 6 and 61 around Collector, Yass, Canberra and Crookwell). Wind farms near Crookwell and Gullen Range have weights close to 1. Flow north from Victoria counts almost one for one against the limit, flow west on Project EnergyConnect relieves it, and Snowy pumping relieves it. It binds for few hours but in high-priced intervals, which is why its dollar value is large for its energy.",
-  "written_effectivedate": "2026-10-09 00:00:00",
-  "written_fingerprint": "4333bae389e6"
+  "constraintid": "N::N_CNCW_2",
+  "note": "This is a transient stability limit between the Snowy area and the rest of NSW. This version applies only while the Canberra to Capital 330 kV line (line 6) is out of service. With that line out, a fault on one of the 330 kV lines between Yass and Bannaby or Marulan could cause generators to lose synchronism if too much power is flowing north. AEMO sets a fixed limit of 1,500 and subtracts the flows already measured on three 330 kV lines (lines 4, 5 and 61 around Collector, Yass and Crookwell), less a margin of 50. Wind farms near Crookwell, Gullen Range, Collector and Rye Park have weights close to 1. Flow north from Victoria counts almost one for one against the limit, and flow west on Project EnergyConnect relieves it. The area has sister constraints for other line outages; the one for the Upper Tumut to Stockdill line works the same way with a limit of 1,200. These constraints bind for few hours but in high-priced intervals, which is why the dollar value is large for the energy.",
+  "written_effectivedate": "2026-10-01",
+  "written_fingerprint": "e8e7c57819a9"
  }
 }
