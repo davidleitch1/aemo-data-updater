@@ -23,8 +23,10 @@ Definitions (see AEMO_spot/plans/congestion_data_plan.md sections 4, 11, 13):
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +34,12 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
-UNIT_TYPES = {"System Strength", "Discretionary", "Unit Zero", "Non-Conformance", "Islanding - Unit"}
+from .network_equation import build_equation_tables
+
+STABILITY_TYPES = {"System Strength", "Islanding - Unit"}
+OTHER_CAP_TYPES = {"Discretionary", "Unit Zero", "Non-Conformance"}
+UNIT_TYPES = STABILITY_TYPES | OTHER_CAP_TYPES
+PLANT_CAUSES = ("Plant stability limit", "Commissioning", "Other plant cap")
 JACCARD_MIN = 0.5          # area membership
 CLUSTER_REL_MIN = 0.10     # unit-set threshold for clustering (relative weight within the constraint)
 BEHIND_REL_MIN = 0.25      # "units behind" threshold (max relative weight across the area)
@@ -49,6 +56,11 @@ OUTPUT_TABLES: Dict[str, str] = {
     "intervals_daily": "day",
     "constraint_meta": "constraintid",
     "area": "area_id",
+    "constraint_hour": "constraintid, hour",
+    "constraint_equation": "constraintid, side, ord",
+    "constraint_equation_meta": "constraintid",
+    "area_rank": "\"window\", rank_energy, area_id",
+    "area_note": "area_id",
     "area_units": "area_id, direction, duid",
     "constraint_daily": "day, constraintid",
     "area_daily": "area_id, day",
@@ -78,8 +90,12 @@ def region_of(cid: str) -> str:
 
 def classify_cause(descr: Optional[str], limittype: Optional[str], cid: str) -> str:
     d = descr or ""
-    if limittype in UNIT_TYPES:
-        return "Unit-specific limit"
+    if (cid or "").startswith("C_") or re.search(r"commissioning", d, re.I):
+        return "Commissioning"
+    if limittype in STABILITY_TYPES:
+        return "Plant stability limit"
+    if limittype in OTHER_CAP_TYPES:
+        return "Other plant cap"
     if re.search(r"out\s*=\s*nil", d, re.I) or re.match(r"\s*nil\b", d, re.I) or "NIL" in cid:
         return "System normal"
     return "Outage"
@@ -173,6 +189,63 @@ def load_area_names(path) -> pd.DataFrame:
     return df[cols].drop_duplicates("area_id", keep="last")
 
 
+def load_registry(path) -> Optional[dict]:
+    """The area registry: {"version", "constraints": {cid: area_id}, "areas": {area_id: {seed, created}}}."""
+    if not path or not Path(str(path)).exists():
+        return None
+    reg = json.loads(Path(str(path)).read_text(encoding="utf-8"))
+    reg.setdefault("constraints", {})
+    reg.setdefault("areas", {})
+    return reg
+
+
+def save_registry(path, reg: dict) -> None:
+    """Atomic write; the previous version is kept as <path>.bak."""
+    path = str(path)
+    tmp = path + ".tmp"
+    Path(tmp).write_text(json.dumps(reg, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    try:
+        if os.path.exists(path):
+            shutil.copy2(path, path + ".bak")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def cluster_with_registry(order: Sequence[str], unit_sets: Dict[str, frozenset], registry: Optional[dict],
+                          today: str) -> Tuple[Dict[str, str], dict]:
+    """Stable areas. Without a registry (or an empty one) cluster as cluster_areas does and record the
+    result. With one, a registered constraint keeps its area; an unregistered one joins the existing area
+    whose seed's unit set has the best Jaccard similarity (>= 0.5) with its own, else founds a new area
+    with itself as seed (constraints with no unit terms always found their own). Returns (map, registry)."""
+    if not registry or not registry.get("constraints"):
+        out = cluster_areas(order, unit_sets)
+        reg = {"version": 1, "constraints": dict(out),
+               "areas": {c: {"seed": c, "created": today} for c in order if out[c] == c}}
+        return out, reg
+    reg = {"version": 1, "constraints": dict(registry["constraints"]),
+           "areas": {a: dict(v) for a, v in registry["areas"].items()}}
+    for cid in order:
+        if cid in reg["constraints"]:
+            continue
+        s = unit_sets.get(cid)
+        best, bj = None, 0.0
+        if s:
+            for aid, info in reg["areas"].items():
+                ss = unit_sets.get(info["seed"])
+                if not ss:
+                    continue
+                j = len(s & ss) / len(s | ss)
+                if j >= JACCARD_MIN and j > bj:
+                    best, bj = aid, j
+        if best is None:
+            best = cid
+            reg["areas"][cid] = {"seed": cid, "created": today}
+        reg["constraints"][cid] = best
+    return {c: reg["constraints"][c] for c in order}, reg
+
+
 def cluster_areas(order: Sequence[str], unit_sets: Dict[str, frozenset]) -> Dict[str, str]:
     """Greedy clustering. ``order`` is the processing order (most binding first). A constraint
     joins the first existing area whose SEED's unit set has Jaccard >= 0.5 with its own, else
@@ -205,13 +278,31 @@ def _step_binding(con) -> None:
     _x(con, f"""create or replace temp table b as
         select settlementdate t, cast(settlementdate - interval 5 minute as date) as day,
                hour(settlementdate - interval 5 minute) as hour, constraintid cid, marginalvalue mv,
-               genconid_effectivedate eff, genconid_versionno ver
+               genconid_effectivedate eff, genconid_versionno ver, rhs, lhs
         from cn.constraint_binding5
         where intervention = 0 and marginalvalue <> 0 and {cls} = 'network'""")
     _x(con, """create or replace temp table data_bounds as
         select (select min(settlementdate) from cn.constraint_intervals) f,
                coalesce((select max(settlementdate) from cn.constraint_intervals), (select max(t) from b)) th,
                (select max(t) from b) bt, (select min(t) from b) bf""")
+    _x(con, """create or replace temp table data_bounds2 as
+        select *, cast(th - interval 5 minute as date) d0 from data_bounds""")
+    _x(con, "create or replace temp table data_bounds as select * from data_bounds2")
+    _x(con, "drop table data_bounds2")
+    for name, ddl in (("generic_constraint_rhs", "genconid varchar, effectivedate timestamp, versionno bigint, "
+                       "scope varchar, termid bigint, groupid bigint, spd_id varchar, spd_type varchar, factor double, "
+                       "operation varchar, defaultvalue double, parameterterm1 varchar, parameterterm2 varchar, "
+                       "parameterterm3 varchar, lastchanged timestamp"),
+                      ("emsmaster", "spd_id varchar, spd_type varchar, description varchar, grouping_id varchar, "
+                       "lastchanged timestamp")):
+        have = con.execute("select count(*) from information_schema.tables where (table_catalog = 'cn' "
+                           "or table_schema = 'cn') and table_name = ?", [name]).fetchone()[0]
+        tgt = {"generic_constraint_rhs": "rhs_src", "emsmaster": "ems_src"}[name]
+        if have:
+            _x(con, f"create or replace temp table {tgt} as select * from cn.{name}"
+               + (" where scope = 'DS'" if name == "generic_constraint_rhs" else ""))
+        else:
+            _x(con, f"create or replace temp table {tgt} ({ddl})")
 
 
 def _step_version_map(con) -> None:
@@ -266,7 +357,7 @@ def _step_unit_binding(con) -> None:
         group by 1, 2, 3, 4, 5, 6""")
 
 
-def _step_constraint_meta(con) -> None:
+def _step_constraint_meta(con, registry=None, today: Optional[str] = None) -> None:
     """constraint_meta + area assignment (clustering in Python)."""
     _x(con, """create or replace temp table lgd as
         select genconid, effectivedate l_eff, versionno l_ver, description, limittype, impact, constrainttype
@@ -310,7 +401,9 @@ def _step_constraint_meta(con) -> None:
             f"select distinct cid, duid from lterms where rel >= {CLUSTER_REL_MIN}").fetchall():
         sets.setdefault(cid, set()).add(duid)
     usets = {k: frozenset(v) for k, v in sets.items()}
-    amap = cluster_areas(list(base.cid), usets)
+    amap, reg_out = cluster_with_registry(list(base.cid), usets, registry, today or datetime.now().strftime("%Y-%m-%d"))
+    _x(con, "create or replace temp table registry_out as select ?::varchar as j", [json.dumps(reg_out, ensure_ascii=False)])
+    created = {a: v.get("created") for a, v in reg_out["areas"].items()}
     base["area_id"] = base.cid.map(amap)
     con.register("cbase_py", base)
     _x(con, "create or replace temp table cbase3 as select * from cbase_py")
@@ -325,6 +418,7 @@ def _step_constraint_meta(con) -> None:
         "name": [g.element.iat[0] for _, g in ar],
         "top_constraintid": [g.cid.iat[0] for _, g in ar],
         "name_source": [g.element_src.iat[0] for _, g in ar],
+        "created": [created.get(a) for a in ar.groups.keys()],
         "description": [g.description.iat[0] for _, g in ar],
         "region": [g.region.iat[0] for _, g in ar],
         "limittype": [g.limittype.iat[0] for _, g in ar],
@@ -348,7 +442,7 @@ def _step_areas(con) -> None:
         select a.area_id, a.name, a.region, a.limittype, a.n_constraints,
                coalesce(u.n_units, 0) n_units, coalesce(u.units_mw, 0) units_mw,
                coalesce(u.weighted_mw, 0) weighted_mw, coalesce(u.missing, 0) missing_capacity_units,
-               a.top_constraintid, a.description, a.name_source, coalesce(ic.ics, '') interconnectors
+               a.top_constraintid, a.description, a.name_source, coalesce(ic.ics, '') interconnectors, a.created
         from area_base a left join (select c.area_id, string_agg(distinct i.interconnectorid, ',' order by i.interconnectorid) ics
                                     from cbase3 c join cn.spd_interconnector i on i.genconid = c.cid
                                          and i.effectivedate = c.l_eff and i.versionno = c.l_ver and i.factor <> 0
@@ -393,25 +487,29 @@ def stale_overrides(con) -> List[str]:
 def _step_area_names(con) -> None:
     """Area name: units' site names for a small unit-specific area, else the top constraint's element."""
     df = con.execute(f"""
-        select a.area_id, a.name, a.name_source, a.n_units, coalesce(d.us, 0) us, coalesce(d.n, 0) n
-        from area a left join (select area_id, sum(n_unit_specific) us, sum(n_intervals) n
+        select a.area_id, a.name, a.name_source, a.n_units, coalesce(d.us, 0) us, coalesce(d.n, 0) n,
+               coalesce(d.nc, 0) ncomm
+        from area a left join (select area_id, sum(n_unit_specific) us, sum(n_intervals) n,
+                                      sum(n_commissioning) nc
                                from area_daily group by 1) d on d.area_id = a.area_id""").df()
     units = con.execute(f"""select area_id, duid, coalesce(site, duid) site from area_units
         where direction = 'discharge' and max_rel_weight >= {BEHIND_REL_MIN}
         order by area_id, max_rel_weight desc, duid""").df()
     sites = units.groupby("area_id").site.apply(list).to_dict()
     dom = dict(con.execute("""select area_id, arg_max(limittype, (n_all, cid)) from cbase3
-        where cause = 'Unit-specific limit' group by 1""").fetchall())
+        where cause in ('Plant stability limit', 'Other plant cap') group by 1""").fetchall())
     ov = {r.area_id: r for r in con.execute("select * from ovr").df().itertuples() if r.name}
     names = []
     for r in df.itertuples():
         nm, src = r.name, r.name_source
-        if 1 <= r.n_units <= 3 and r.n > 0 and r.us * 2 > r.n and r.area_id in sites and r.area_id in dom:
+        comm = r.ncomm * 2 > r.n
+        if (1 <= r.n_units <= 3 and r.n > 0 and r.us * 2 > r.n and r.area_id in sites
+                and (comm or r.area_id in dom)):
             seen: Dict[str, str] = {}
             for st in sites[r.area_id]:
                 k = station_name(st)
                 seen.setdefault(k.lower(), k)
-            nm = " + ".join(seen.values()) + " \u2014 " + limit_label(dom[r.area_id])
+            nm = " + ".join(seen.values()) + " \u2014 " + ("commissioning" if comm else limit_label(dom[r.area_id]))
             src = "site"
         if r.area_id in ov:
             nm, src = ov[r.area_id].name, "override"
@@ -428,9 +526,12 @@ def _step_daily(con) -> None:
     _x(con, """create or replace temp table bc as
         select b.*, c.area_id, c.cause, c.region, c.limittype
         from b join cbase3 c on c.cid = b.cid""")
-    _x(con, """create or replace temp table constraint_daily as
-        select day, cid constraintid, count(*) n_intervals, median(abs(mv)) median_abs_mv
+    _x(con, """create or replace temp table cd_base as
+        select day, cid as constraintid, count(*) n_intervals, median(abs(mv)) median_abs_mv
         from b group by 1, 2""")
+    _x(con, """create or replace temp table constraint_hour as
+        select cid as constraintid, hour, count(*) n_intervals from b
+        where day > (select d0 from data_bounds) - 365 group by 1, 2""")
     _x(con, """create or replace temp table cause_daily_ as
         select day, region, cause, limittype, count(*) n_constraint_intervals from bc group by 1, 2, 3, 4""")
     _x(con, "create or replace temp table cause_daily as select * from cause_daily_")
@@ -438,7 +539,11 @@ def _step_daily(con) -> None:
         select day, area_id, count(distinct t) n_intervals,
                count(distinct t) filter (where cause = 'System normal') n_sysnormal,
                count(distinct t) filter (where cause = 'Outage') n_outage,
-               count(distinct t) filter (where cause = 'Unit-specific limit') n_unit_specific
+               count(distinct t) filter (where cause = 'Plant stability limit') n_plant_stability,
+               count(distinct t) filter (where cause = 'Commissioning') n_commissioning,
+               count(distinct t) filter (where cause = 'Other plant cap') n_other_cap,
+               count(distinct t) filter (where cause in ('Plant stability limit', 'Commissioning', 'Other plant cap'))
+                 n_unit_specific
         from bc group by 1, 2""")
     _x(con, """create or replace temp table definition_rule_monthly as
         select date_trunc('month', b.day) as month, coalesce(m.rule, 'none') definition_rule, count(*) n_rows
@@ -472,8 +577,16 @@ def _step_units(con) -> None:
     _x(con, """create or replace temp table area_cur as
         select day, area_id, sum(mwh) constrained_mwh, sum(val) constrained_value
         from curj where dom_cid is not null group by 1, 2""")
+    _x(con, """create or replace temp table con_cur as
+        select day, dom_cid cid, sum(mwh) constrained_mwh, sum(val) constrained_value
+        from curj where dom_cid is not null group by 1, 2""")
+    _x(con, """create or replace temp table constraint_daily as
+        select c.day, c.constraintid, c.n_intervals, c.median_abs_mv,
+               coalesce(e.constrained_mwh, 0) constrained_mwh, coalesce(e.constrained_value, 0) constrained_value
+        from cd_base c left join con_cur e on e.day = c.day and e.cid = c.constraintid""")
     _x(con, """create or replace temp table area_daily as
-        select a.day, a.area_id, a.n_intervals, a.n_sysnormal, a.n_outage, a.n_unit_specific,
+        select a.day, a.area_id, a.n_intervals, a.n_sysnormal, a.n_outage, a.n_plant_stability, a.n_commissioning,
+               a.n_other_cap, a.n_unit_specific,
                coalesce(c.constrained_mwh, 0) constrained_mwh, coalesce(c.constrained_value, 0) constrained_value
         from area_bind a left join area_cur c on c.day = a.day and c.area_id = a.area_id""")
     _x(con, """create or replace temp table lp as
@@ -542,18 +655,59 @@ def _step_outages(con) -> None:
         where x.n_binding_intervals > 0""")
 
 
-def build(con, built_at: Optional[datetime] = None, area_names=None) -> Dict[str, int]:
+def _step_rank_notes(con, notes) -> None:
+    """area.lead_constraintid, area_rank (12m, 90d, 12m_prev) and area_note."""
+    _x(con, """create or replace temp table lead as
+        select area_id, arg_min(cid, struct_pack(a := -mwh, b := -n365, c := cid)) lead_constraintid from (
+          select c.area_id, c.cid, coalesce(e.mwh, 0) mwh, c.n365 from cbase3 c
+          left join (select constraintid cid, sum(constrained_mwh) mwh from constraint_daily
+                     where day > (select d0 from data_bounds) - 365 group by 1) e on e.cid = c.cid)
+        group by 1""")
+    _x(con, "alter table area add column lead_constraintid varchar")
+    _x(con, "update area set lead_constraintid = l.lead_constraintid from lead l where area.area_id = l.area_id")
+    _x(con, """create or replace temp table win as
+        select * from (values ('12m', 365, 0), ('90d', 90, 0), ('12m_prev', 90 + 365, 90)) v(win_name, lo, hi)""")
+    _x(con, """create or replace temp table area_rank as
+        with a as (
+          select w.win_name, d.area_id, sum(d.constrained_mwh) / 1000.0 as gwh, sum(d.n_intervals) / 12.0 as hours
+          from area_daily d, win w, data_bounds x
+          where d.day > x.d0 - w.lo and d.day <= x.d0 - w.hi group by 1, 2)
+        select win_name as "window", area_id, gwh, hours,
+               dense_rank() over (partition by win_name order by gwh desc) rank_energy,
+               dense_rank() over (partition by win_name order by hours desc) rank_hours from a""")
+    _x(con, """create or replace temp table area_note_in (area_id varchar, constraintid varchar, note varchar,
+        written_effectivedate timestamp, written_fingerprint varchar)""")
+    if notes and Path(str(notes)).exists():
+        data = json.loads(Path(str(notes)).read_text(encoding="utf-8"))
+        rows = [[a, v.get("constraintid"), v.get("note"), v.get("written_effectivedate"),
+                 v.get("written_fingerprint")] for a, v in data.items()]
+        if rows:
+            con.executemany("insert into area_note_in values (?, ?, ?, ?::timestamp, ?)", rows)
+    _x(con, """create or replace temp table area_note as
+        select n.area_id, n.constraintid, n.note, n.written_effectivedate, n.written_fingerprint,
+               m.fingerprint current_fingerprint,
+               (m.fingerprint is distinct from n.written_fingerprint
+                or a.lead_constraintid is distinct from n.constraintid) is_stale
+        from area_note_in n left join area a on a.area_id = n.area_id
+             left join constraint_equation_meta m on m.constraintid = n.constraintid""")
+
+
+def build(con, built_at: Optional[datetime] = None, area_names=None, registry=None,
+          notes=None) -> Dict[str, int]:
     """Build every output table as a temp table in ``con``. Returns row counts."""
     t0 = time.time()
     _step_binding(con)
     _step_version_map(con)
     _step_unit_binding(con)
-    _step_constraint_meta(con)
+    built = built_at or datetime.now()
+    _step_constraint_meta(con, load_registry(registry) if registry else None, built.strftime("%Y-%m-%d"))
     _step_areas(con)
     _step_regions(con, load_area_names(area_names))
     _step_daily(con)
     _step_units(con)
     _step_area_names(con)
+    build_equation_tables(con)
+    _step_rank_notes(con, notes)
     _step_outages(con)
     n_all = con.execute(
         "select count(*) from cn.constraint_binding5 where intervention = 0 and marginalvalue <> 0").fetchone()[0]
@@ -597,7 +751,10 @@ def write_output(con, out_path) -> None:
         raise
 
 
-def run(con, out_path, area_names=None) -> Dict[str, int]:
-    counts = build(con, area_names=area_names)
+def run(con, out_path, area_names=None, registry=None, notes=None) -> Dict[str, int]:
+    counts = build(con, area_names=area_names, registry=registry, notes=notes)
+    if registry:
+        j = con.execute("select j from registry_out").fetchone()[0]
+        save_registry(registry, json.loads(j))
     write_output(con, out_path)
     return counts
