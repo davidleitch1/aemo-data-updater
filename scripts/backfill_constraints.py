@@ -19,6 +19,14 @@ over 5 MB and 1 s after small ones.
 
     .venv/bin/python scripts/backfill_constraints.py --start 2024-07 --end 2026-10 \\
         --defs-from 2015-01 --snapshots [--tables T1,T2] [--pause 20] [--db PATH] [--dry-run]
+
+Scheduled use (--auto): end = the newest month whose MMSDM directory exists (last month, else the
+month before); definition tables are swept from two months before end; interval tables load for
+the end month only and --snapshots is implied. The end month's interval tables are what the live
+collector also wrote, so each is logged as "inserted N, already present M": inserted > 0 means
+live collection missed those rows and the archive supplied them.
+
+    .venv/bin/python scripts/backfill_constraints.py --auto [--pause 20] [--db PATH]
 """
 from __future__ import annotations
 
@@ -141,6 +149,34 @@ def plan(args) -> dict[str, list[str]]:
     return {f"{y}-{m:02d}": ts for (y, m), ts in sorted(out.items(), reverse=True)}
 
 
+def previous_months(today, n: int = 2) -> list[tuple[int, int]]:
+    """The n months before today's month, nearest first."""
+    y, m = today.year, today.month
+    out = []
+    for _ in range(n):
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+        out.append((y, m))
+    return out
+
+
+def shift_month(ym: tuple[int, int], back: int) -> tuple[int, int]:
+    y, m = ym
+    for _ in range(back):
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    return y, m
+
+
+def pick_auto_end(listing, today):
+    """Newest month (last month, then the month before) whose MMSDM directory exists."""
+    for y, m in previous_months(today):
+        try:
+            listing(f"{y}-{m:02d}")
+            return (y, m)
+        except Unavailable:
+            continue
+    return None
+
+
 def _fmt(results) -> str:
     return "; ".join(f"{t} inserted {i}, already present {p}" for t, i, p in results)
 
@@ -155,11 +191,14 @@ def _extract(zip_path: Path, dest_csv: Path) -> None:
 
 # ---------------------------------------------------------------- main
 
-def main(argv=None, *, listing=curl_listing, download=curl_download, sleep=time.sleep, log=None) -> int:
+def main(argv=None, *, listing=curl_listing, download=curl_download, sleep=time.sleep, log=None,
+         today=None) -> int:
     log = log or (lambda s: print(s, flush=True))
     ap = argparse.ArgumentParser(description="Backfill constraint history from MMSDM")
     ap.add_argument("--start", type=parse_ym, help="first month of the interval tables (YYYY-MM)")
-    ap.add_argument("--end", type=parse_ym, required=True, help="last month (YYYY-MM)")
+    ap.add_argument("--end", type=parse_ym, help="last month (YYYY-MM)")
+    ap.add_argument("--auto", action="store_true",
+                    help="scheduled mode: newest published month, 2-month definition sweep, snapshots")
     ap.add_argument("--defs-from", type=parse_ym, help="first month of the definition-table sweep")
     ap.add_argument("--snapshots", action="store_true", help="load snapshot tables from the --end month")
     ap.add_argument("--tables", help="comma-separated source tables to restrict to")
@@ -167,6 +206,27 @@ def main(argv=None, *, listing=curl_listing, download=curl_download, sleep=time.
     ap.add_argument("--db", type=Path, default=None)
     ap.add_argument("--dry-run", action="store_true", help="list what would be fetched")
     args = ap.parse_args(argv)
+    if args.auto:
+        if args.start or args.end or args.defs_from:
+            ap.error("--auto picks its own months; do not combine with --start/--end/--defs-from")
+        from datetime import date
+        memo = {}
+
+        def listing_once(ym, _inner=listing):
+            if ym not in memo:
+                memo[ym] = _inner(ym)
+            return memo[ym]
+
+        listing = listing_once
+        args.end = pick_auto_end(listing, today or date.today())
+        if args.end is None:
+            log("auto: no MMSDM directory for the last two months")
+            return 1
+        args.start, args.defs_from, args.snapshots = args.end, shift_month(args.end, 2), True
+        log(f"auto: end month {args.end[0]}-{args.end[1]:02d}, definitions from "
+            f"{args.defs_from[0]}-{args.defs_from[1]:02d}")
+    elif args.end is None:
+        ap.error("--end is required (or use --auto)")
     if not (args.start or args.defs_from or args.snapshots):
         ap.error("nothing to do: give --start, --defs-from and/or --snapshots")
     if args.start and args.start > args.end:
@@ -233,6 +293,9 @@ def main(argv=None, *, listing=curl_listing, download=curl_download, sleep=time.
                         csvs.append((part, csv))
                     results = store.load_month_table(con, t, ym, csvs)
                     log(f"{ym} {t}: {_fmt(results)}")
+                    if args.auto and t in INTERVAL_TABLES and any(i for _, i, _ in results):
+                        log(f"{ym} {t}: RECONCILE inserted rows the live collector did not hold "
+                            f"({', '.join(f'{n} {i}' for n, i, _ in results if i)})")
                 except Unavailable:
                     log(f"{ym} {t}: unavailable (file listed but not downloadable)")
                 except Exception as e:  # noqa: BLE001
