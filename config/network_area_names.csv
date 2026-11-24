@@ -1,0 +1,31 @@
+area_id,name,region
+N>>NIL_060_051,"Southern NSW: Jindera–Wodonga and Wagga–Lower Tumut 330 kV",NSW
+N>NIL_94T,"Central-west NSW: Molong–Orange North 132 kV",NSW
+S>NIL_MHNW1_MHNW2,"Murraylink (SA side): Monash–North West Bend 132 kV",SA
+V^^V_NIL_KGTS,"North-west Victoria: voltage stability, Horsham–Murra Warra–Kiamal 220 kV",VIC
+NSA_S_PPT_42,"Pelican Point network support agreement (minimum 42 MW)",SA
+N>NIL_969,"North-west NSW: Gunnedah–Tamworth 132 kV",NSW
+Q>NIL_LCCP_BCCP,"Central Queensland: Gladstone corridor (Calliope River, Larcom Creek, Wurdong 275 kV)",QLD
+V>NIL_WETX_NIL,"Wemen transformer (Bannerton and Wemen solar farms)",VIC
+V::N_NIL_V2,"Victoria: transient stability, Hazelwood–South Morang 500 kV",VIC
+N>NIL_9R6_991,"Wagga North–Wagga 132 kV",NSW
+SVML_ZERO,"Murraylink: SA to Victoria held at zero",SA
+N>>NIL_964_84_S,"NSW mid-north coast: Port Macquarie–Herons Creek 132 kV",NSW
+V_DUNDWF1_2_3_168,"Dundonnell Wind Farm — 168 MW cap",VIC
+N^^V_NIL_1,"Southern NSW: voltage stability for loss of the largest Victorian unit or Basslink",NSW
+V>NIL_GNTX_GNTX_TEMP,"Glenrowan transformers (north-east Victoria)",VIC
+N::N_SDUT_2,"Snowy to NSW: transient stability limits (Yass–Bannaby–Marulan)",NSW
+V::S_SETB_TBSE_2,"Victoria to SA: transient stability, South East–Tailem Bend 275 kV outage",VIC
+N>Q-NIL_757_758,"Terranora interconnector: Terranora–Mudgeeraba 110 kV",NSW
+SVML^NIL_MH-CAP_ON,"Murraylink: SA to Victoria voltage limit at Monash",SA
+L_PEC_NIL,"Project EnergyConnect loop: system normal",NSW
+L_PEC_X_6C_6G_6H,"Project EnergyConnect loop: N-3 outage constraint",NSW
+L_PEC_X_6C_6G_6H_XST,"Project EnergyConnect loop: N-3 outage constraint (dispatch and predispatch only)",NSW
+N::Q_ARSR_1,"NSW to Queensland: transient stability, Armidale–Sapphire 330 kV outage",NSW
+V_NWVIC_GFT1_750,"North-west Victoria wind farms: combined output limit",VIC
+V_S_HEYWOOD_UFLS,"Heywood interconnector: SA under-frequency load shedding limit",VIC
+N>NIL_LSDU,"Northern NSW: Lismore–Dunoon",NSW
+T_MRWF_GCS,"Musselroe Wind Farm control scheme (Tasmania frequency)",TAS
+T::T_NIL_1,"Tasmania: transient stability, Farrell–Sheffield",TAS
+N>NIL_901,"West Wyalong–Temora 132 kV",NSW
+C_V_LANCSF1_ZERO,"Lancaster Solar Farm — commissioning (zero MW)",VIC

@@ -63,8 +63,17 @@ OUTPUT_TABLES: Dict[str, str] = {
 
 # ------------------------------------------------------------------ pure python helpers
 
+REGION_PREFIXES = [("NSA_S", "SA"), ("C_V_", "VIC"), ("C_N_", "NSW"), ("C_Q_", "QLD"), ("C_S_", "SA"),
+                   ("C_T_", "TAS"), ("SVML", "SA"), ("VS_", "VIC"), ("V_S_", "VIC")]
+
+
 def region_of(cid: str) -> str:
-    return {"N": "NSW", "L": "NSW", "Q": "QLD", "V": "VIC", "S": "SA", "T": "TAS"}.get((cid or "")[:1], "Other")
+    """Region from the constraint ID: specific prefixes first, then the first letter."""
+    cid = cid or ""
+    for p, r in REGION_PREFIXES:
+        if cid.startswith(p):
+            return r
+    return {"N": "NSW", "L": "NSW", "Q": "QLD", "V": "VIC", "S": "SA", "T": "TAS"}.get(cid[:1], "Other")
 
 
 def classify_cause(descr: Optional[str], limittype: Optional[str], cid: str) -> str:
@@ -76,22 +85,30 @@ def classify_cause(descr: Optional[str], limittype: Optional[str], cid: str) -> 
     return "Outage"
 
 
-def _fallback_name(descr: Optional[str], cid: str) -> str:
+def _tidy(name: str) -> str:
+    """Remove a leading 'on ' / 'avoid ' and capitalise the first letter."""
+    n = re.sub(r"^(?:avoid\s+|on\s+)", "", name.strip(), flags=re.I).strip()
+    return n[:1].upper() + n[1:]
+
+
+def _fallback_name(descr: Optional[str], cid: str) -> Tuple[str, str]:
     d = re.sub(r"\s+", " ", descr or "").strip()
     d = re.sub(r"^out\s*=\s*nil\s*,?\s*", "", d, flags=re.I).strip()
+    d = re.sub(r"^(?:avoid\s+|on\s+)", "", d, flags=re.I).strip()
     if not d:
-        return cid
-    if len(d) <= NAME_MAX:
-        return d
-    cut = d[:NAME_MAX + 1]
-    sp = cut.rfind(" ", 0, NAME_MAX + 1)
-    return (cut[:sp] if sp > 0 else d[:NAME_MAX]).rstrip(" ,;-")
+        return cid, "id"
+    if len(d) > NAME_MAX:
+        cut = d[:NAME_MAX + 1]
+        sp = cut.rfind(" ", 0, NAME_MAX + 1)
+        d = (cut[:sp] if sp > 0 else d[:NAME_MAX]).rstrip(" ,;-")
+    return d[:1].upper() + d[1:], "description"
 
 
-def element_name(descr: Optional[str], cid: str) -> str:
-    """Protected element named in AEMO's constraint description (regex chain from the phase 0
-    prototype). A parse with fewer than 6 letters, or no parse, falls back to the description
-    (leading 'Out= Nil,' removed, at most 70 characters at a word boundary), then to the ID."""
+def element_name_src(descr: Optional[str], cid: str) -> Tuple[str, str]:
+    """(name, source) where source is 'element', 'description' or 'id'. The protected element is
+    parsed from AEMO's description with the phase 0 regex chain; a parse with fewer than 6 letters,
+    or none, falls back to the description (leading 'Out= Nil,' removed, at most 70 characters at a
+    word boundary), then to the ID. Leading 'on '/'avoid ' is dropped and the first letter capitalised."""
     d = re.sub(r"\s+", " ", descr or "")
     m = re.search(r"avoid(?:ing)?\s+(?:O/L|overload(?:ing)?)\s*(?:of\s+)?(?:either\s+)?(.+?)"
                   r"(?:\s+on\s+(?:the\s+)?trip|\s+using|\s+for\s+loss|,|\.|$)", d, re.I)
@@ -103,8 +120,57 @@ def element_name(descr: Optional[str], cid: str) -> str:
         e = re.sub(r"\b(330|275|220|132|110|66)\s*kV\b|\bline\b|#", "", m.group(1), flags=re.I)
         e = re.sub(r"\s+", " ", e).strip(" ,")
         if sum(ch.isalpha() for ch in e) >= MIN_NAME_LETTERS:
-            return e
+            return _tidy(e), "element"
     return _fallback_name(descr, cid)
+
+
+def element_name(descr: Optional[str], cid: str) -> str:
+    return element_name_src(descr, cid)[0]
+
+
+_STATION_PATTERNS = [
+    r"\s*[-\u2013]\s*(?:phase|stage)\s*\d+\s*$",
+    r"\s+(?:phase|stage)\s*\d+\s*$",
+    r"\s*[-\u2013]\s*(?:solar|wind|bess|battery|wind farm|solar farm|energy storage)\s*$",
+    r"\s+unit\s*\d+\s*$",
+    r"\s*[-\u2013]\s*$",
+    r"\s+\d+\s*$",
+]
+
+
+def station_name(site: str) -> str:
+    """Strip trailing station qualifiers (phase/stage, technology, unit, suffix numbers)."""
+    n = (site or "").strip()
+    for _ in range(20):
+        for p in _STATION_PATTERNS:
+            m = re.sub(p, "", n, flags=re.I)
+            if m != n:
+                n = m
+                break
+        else:
+            break
+    return n or (site or "").strip()
+
+
+LIMIT_LABEL = {"islanding - unit": "islanding risk", "discretionary": "discretionary cap"}
+
+
+def limit_label(limittype: Optional[str]) -> str:
+    lt = (limittype or "").lower()
+    return LIMIT_LABEL.get(lt, lt)
+
+
+def load_area_names(path) -> pd.DataFrame:
+    """Overrides CSV (area_id, name, region). A missing file means no overrides."""
+    cols = ["area_id", "name", "region"]
+    if not path or not Path(str(path)).exists():
+        return pd.DataFrame({c: pd.Series(dtype="object") for c in cols})
+    df = pd.read_csv(path, encoding="utf-8", dtype=str).fillna("")
+    for c in cols:
+        if c not in df:
+            df[c] = ""
+    df["area_id"] = df.area_id.str.strip()
+    return df[cols].drop_duplicates("area_id", keep="last")
 
 
 def cluster_areas(order: Sequence[str], unit_sets: Dict[str, frozenset]) -> Dict[str, str]:
@@ -220,7 +286,9 @@ def _step_constraint_meta(con) -> None:
     base["limittype"] = base["limittype"].fillna("Not described").astype(str)
     base["impact"] = base["impact"].fillna("").astype(str)
     base["cause"] = [classify_cause(d, l, c) for d, l, c in zip(base.description, base.limittype, base.cid)]
-    base["element"] = [element_name(d, c) for d, c in zip(base.description, base.cid)]
+    es = [element_name_src(d, c) for d, c in zip(base.description, base.cid)]
+    base["element"] = [e[0] for e in es]
+    base["element_src"] = [e[1] for e in es]
     base["region"] = base.cid.map(region_of)
     base = base.sort_values(["n365", "cid"], ascending=[False, True]).reset_index(drop=True)
     con.register("cbase_py", base)
@@ -256,6 +324,7 @@ def _step_constraint_meta(con) -> None:
         "area_id": list(ar.groups.keys()),
         "name": [g.element.iat[0] for _, g in ar],
         "top_constraintid": [g.cid.iat[0] for _, g in ar],
+        "name_source": [g.element_src.iat[0] for _, g in ar],
         "description": [g.description.iat[0] for _, g in ar],
         "region": [g.region.iat[0] for _, g in ar],
         "limittype": [g.limittype.iat[0] for _, g in ar],
@@ -279,8 +348,12 @@ def _step_areas(con) -> None:
         select a.area_id, a.name, a.region, a.limittype, a.n_constraints,
                coalesce(u.n_units, 0) n_units, coalesce(u.units_mw, 0) units_mw,
                coalesce(u.weighted_mw, 0) weighted_mw, coalesce(u.missing, 0) missing_capacity_units,
-               a.top_constraintid, a.description
-        from area_base a left join (
+               a.top_constraintid, a.description, a.name_source, coalesce(ic.ics, '') interconnectors
+        from area_base a left join (select c.area_id, string_agg(distinct i.interconnectorid, ',' order by i.interconnectorid) ics
+                                    from cbase3 c join cn.spd_interconnector i on i.genconid = c.cid
+                                         and i.effectivedate = c.l_eff and i.versionno = c.l_ver and i.factor <> 0
+                                    group by 1) ic on ic.area_id = a.area_id
+        left join (
           select area_id,
                  count(*) filter (where max_rel_weight >= {BEHIND_REL_MIN}) n_units,
                  sum(coalesce(capacity_mw, 0)) filter (where max_rel_weight >= {BEHIND_REL_MIN}) units_mw,
@@ -289,26 +362,62 @@ def _step_areas(con) -> None:
           from area_units where direction = 'discharge' group by 1) u on u.area_id = a.area_id""")
 
 
+def _step_regions(con, overrides: pd.DataFrame) -> None:
+    """Region: override file, else modal region of the units behind, else the ID-prefix rule."""
+    _x(con, "create or replace temp table ovr (area_id varchar, name varchar, region varchar)")
+    rows = [[str(r.area_id), str(r.name), str(r.region)] for r in overrides.itertuples()]
+    if rows:
+        con.executemany("insert into ovr values (?, ?, ?)", rows)
+    _x(con, "create or replace temp table override_stale as select area_id from ovr "
+            "where area_id not in (select area_id from area) order by 1")
+    _x(con, f"""create or replace temp table area_reg as
+        select area_id, region from (
+          select area_id, region, row_number() over (partition by area_id order by n desc, region) rn from (
+            select area_id, regexp_replace(region, '[0-9]+$', '') region, count(*) n from area_units
+            where direction = 'discharge' and max_rel_weight >= {BEHIND_REL_MIN} and region is not null
+            group by 1, 2)) where rn = 1""")
+    _x(con, """create or replace temp table area_region_src as
+        select a.area_id, coalesce(nullif(o.region, ''), r.region) region
+        from area a left join area_reg r on r.area_id = a.area_id left join ovr o on o.area_id = a.area_id
+        where coalesce(nullif(o.region, ''), r.region) is not null""")
+    _x(con, "update area set region = r.region from area_region_src r where area.area_id = r.area_id")
+    _x(con, "update cbase3 set region = r.region from area_region_src r where cbase3.area_id = r.area_id")
+    _x(con, "update constraint_meta set region = r.region from area_region_src r "
+            "where constraint_meta.area_id = r.area_id")
+
+
+def stale_overrides(con) -> List[str]:
+    return [r[0] for r in con.execute("select area_id from override_stale").fetchall()]
+
+
 def _step_area_names(con) -> None:
     """Area name: units' site names for a small unit-specific area, else the top constraint's element."""
     df = con.execute(f"""
-        select a.area_id, a.name, a.limittype, a.n_units,
-               coalesce(d.us, 0) us, coalesce(d.n, 0) n
+        select a.area_id, a.name, a.name_source, a.n_units, coalesce(d.us, 0) us, coalesce(d.n, 0) n
         from area a left join (select area_id, sum(n_unit_specific) us, sum(n_intervals) n
                                from area_daily group by 1) d on d.area_id = a.area_id""").df()
     units = con.execute(f"""select area_id, duid, coalesce(site, duid) site from area_units
         where direction = 'discharge' and max_rel_weight >= {BEHIND_REL_MIN}
         order by area_id, max_rel_weight desc, duid""").df()
     sites = units.groupby("area_id").site.apply(list).to_dict()
+    dom = dict(con.execute("""select area_id, arg_max(limittype, (n_all, cid)) from cbase3
+        where cause = 'Unit-specific limit' group by 1""").fetchall())
+    ov = {r.area_id: r for r in con.execute("select * from ovr").df().itertuples() if r.name}
     names = []
     for r in df.itertuples():
-        nm = r.name
-        if 1 <= r.n_units <= 3 and r.n > 0 and r.us * 2 > r.n and r.area_id in sites:
-            uniq = list(dict.fromkeys(sites[r.area_id]))
-            nm = " + ".join(uniq) + " \u2014 " + (r.limittype or "").lower()
-        names.append((r.area_id, nm))
-    con.register("nm_py", pd.DataFrame(names, columns=["area_id", "nm"]))
-    _x(con, "update area set name = n.nm from nm_py n where area.area_id = n.area_id")
+        nm, src = r.name, r.name_source
+        if 1 <= r.n_units <= 3 and r.n > 0 and r.us * 2 > r.n and r.area_id in sites and r.area_id in dom:
+            seen: Dict[str, str] = {}
+            for st in sites[r.area_id]:
+                k = station_name(st)
+                seen.setdefault(k.lower(), k)
+            nm = " + ".join(seen.values()) + " \u2014 " + limit_label(dom[r.area_id])
+            src = "site"
+        if r.area_id in ov:
+            nm, src = ov[r.area_id].name, "override"
+        names.append((r.area_id, nm, src))
+    con.register("nm_py", pd.DataFrame(names, columns=["area_id", "nm", "src"]))
+    _x(con, "update area set name = n.nm, name_source = n.src from nm_py n where area.area_id = n.area_id")
     con.unregister("nm_py")
 
 
@@ -433,7 +542,7 @@ def _step_outages(con) -> None:
         where x.n_binding_intervals > 0""")
 
 
-def build(con, built_at: Optional[datetime] = None) -> Dict[str, int]:
+def build(con, built_at: Optional[datetime] = None, area_names=None) -> Dict[str, int]:
     """Build every output table as a temp table in ``con``. Returns row counts."""
     t0 = time.time()
     _step_binding(con)
@@ -441,6 +550,7 @@ def build(con, built_at: Optional[datetime] = None) -> Dict[str, int]:
     _step_unit_binding(con)
     _step_constraint_meta(con)
     _step_areas(con)
+    _step_regions(con, load_area_names(area_names))
     _step_daily(con)
     _step_units(con)
     _step_area_names(con)
@@ -487,7 +597,7 @@ def write_output(con, out_path) -> None:
         raise
 
 
-def run(con, out_path) -> Dict[str, int]:
-    counts = build(con)
+def run(con, out_path, area_names=None) -> Dict[str, int]:
+    counts = build(con, area_names=area_names)
     write_output(con, out_path)
     return counts

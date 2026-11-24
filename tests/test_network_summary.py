@@ -207,7 +207,7 @@ def test_element_name_chain():
     assert ns.element_name("Out= Nil avoid overloading Calliope River to Wurdong 275 kV line on trip of X", "C") \
         == "Calliope River to Wurdong"
     assert ns.element_name("limit Molong-Orange North flow to X", "C") == "Molong-Orange North"
-    assert ns.element_name("no pattern here", "CID") == "no pattern here"
+    assert ns.element_name("no pattern here", "CID") == "No pattern here"
     assert ns.element_name("", "CID") == "CID"
     assert ns.element_name(None, "CID") == "CID"
 
@@ -289,11 +289,11 @@ def test_weights_are_scale_free_and_cluster_set_uses_relative_weight():
 # ------------------------------------------------------------------ names
 
 def test_element_name_rejects_short_parse_and_falls_back_to_description():
-    assert ns.element_name("Out= Nil, avoid O/L of 80% on trip of X", "CID") == "avoid O/L of 80% on trip of X"
+    assert ns.element_name("Out= Nil, avoid O/L of 80% on trip of X", "CID") == "O/L of 80% on trip of X"
     long = "Out = NIL, " + "word " * 30
     got = ns.element_name(long, "CID")
-    assert len(got) <= 70 and got.startswith("word word") and not got.endswith(" ") and "Nil" not in got
-    assert got == ("word " * 14).strip()                    # 69 chars: cut back to the word boundary
+    assert len(got) <= 70 and got.startswith("Word word") and not got.endswith(" ") and "Nil" not in got
+    assert got == ("Word" + " word" * 13)                    # 69 chars: cut back to the word boundary
     assert ns.element_name("Out= A-B", "CID") == "Out= A-B"  # only a leading Out= Nil prefix is stripped
     assert ns.element_name("avoid O/L of Wagga Wagga (818) on trip", "CID") == "Wagga Wagga (818)"   # codes kept
 
@@ -500,3 +500,106 @@ def test_failed_build_leaves_old_file_untouched(tmp_path):
         ns.write_output(s.con, out)
     assert out.read_bytes() == before
     assert not os.path.exists(str(out) + ".tmp")
+
+
+# ------------------------------------------------------------------ overrides, regions, site names, interconnectors
+
+def test_region_prefix_rules():
+    for cid, r in [("NSA_S_PPT_42", "SA"), ("C_V_X", "VIC"), ("C_N_X", "NSW"), ("C_Q_X", "QLD"), ("C_S_X", "SA"),
+                   ("C_T_X", "TAS"), ("SVML_ZERO", "SA"), ("VS_X", "VIC"), ("V_S_HEYWOOD_UFLS", "VIC"),
+                   ("N_X", "NSW"), ("L_PEC", "NSW"), ("Q_X", "QLD"), ("V_X", "VIC"), ("S_X", "SA"), ("T_X", "TAS"),
+                   ("Z_X", "Other")]:
+        assert ns.region_of(cid) == r, cid
+
+
+def test_region_from_units_behind_beats_prefix_and_override_beats_units(tmp_path):
+    s = Scn()
+    s.constraint("N_A", terms={"CP_U1": 1.0, "CP_U2": 1.0, "CP_U3": 0.01}, descr="avoid O/L of Element Alpha on trip")
+    s.constraint("N_B", terms={"CP_W": 1.0}, descr="avoid O/L of Element Bravo on trip")
+    s.unit("U1", region="QLD1")
+    s.unit("U2", region="QLD1")
+    s.unit("U3", region="SA1")                  # not behind (relative weight .01)
+    s.unit("W", region="VIC1")
+    s.bind("N_A", T0)
+    s.bind("N_B", T0)
+    csv = tmp_path / "names.csv"
+    csv.write_text("area_id,name,region\nN_B,Bravo override \u2013 x,TAS\nGONE,Old name,SA\n", encoding="utf-8")
+    ns.build(s.con, area_names=csv)
+    assert s.q("select region from area where area_id='N_A'") == [("QLD",)]          # modal, not the N prefix
+    assert s.q("select region from constraint_meta where constraintid='N_A'") == [("QLD",)]
+    assert s.q("select region from cause_daily where limittype='Thermal' and region='QLD'")
+    assert s.q("select name, name_source, region from area where area_id='N_B'") == [
+        ("Bravo override \u2013 x", "override", "TAS")]
+    assert s.q("select region from constraint_meta where constraintid='N_B'") == [("TAS",)]
+    assert ns.stale_overrides(s.con) == ["GONE"]
+    assert s.q("select name_source from area where area_id='N_A'") == [("element",)]
+
+
+def test_missing_override_file_is_not_an_error(tmp_path):
+    s = Scn()
+    s.constraint("N_A", terms={"CP_U": 1.0})
+    s.unit("U")
+    s.bind("N_A", T0)
+    ns.build(s.con, area_names=tmp_path / "nope.csv")
+    assert ns.stale_overrides(s.con) == []
+    assert s.q("select region from area") == [("NSW",)]
+
+
+def test_name_source_values():
+    s = Scn()
+    s.constraint("N_E", descr="avoid O/L of Element Foxtrot on trip")                   # element
+    s.constraint("N_D", descr="Out= Nil, something quite different here")                # description
+    s.constraint("N_I", versions=[(V1, 1)])
+    s.bind("N_E", T0)
+    s.bind("N_D", T0)
+    s.bind("N_NOPE", T0)                                                                 # id
+    s.build()
+    got = dict(s.q("select top_constraintid, name_source from area"))
+    assert got == {"N_E": "element", "N_D": "description", "N_NOPE": "id"}
+
+
+def test_tidy_and_station_names():
+    assert ns.element_name("avoid voltage collapse at Foo Place", "C") == "Voltage collapse at Foo Place"
+    assert ns.element_name("on Dundonnell WF (1 + 2 + 3)", "C") == "Dundonnell WF (1 + 2 + 3)"
+    assert ns.element_name("limit x flow to y", "C") == "Limit x flow to y"
+    assert ns.station_name("Kennedy Energy Park - Phase 1 - Solar") == "Kennedy Energy Park"
+    assert ns.station_name("Kennedy Energy Park - Phase 1 - Wind") == "Kennedy Energy Park"
+    assert ns.station_name("Murra Warra Wind Farm - stage 1") == "Murra Warra Wind Farm"
+    assert ns.station_name("Murra Warra Wind Farm - Stage 2") == "Murra Warra Wind Farm"
+    assert ns.station_name("Haughton Solar Farm Stage 1") == "Haughton Solar Farm"
+    assert ns.station_name("Foo Battery - BESS") == "Foo Battery"
+    assert ns.station_name("Bar Wind Farm Unit 1") == "Bar Wind Farm"
+    assert ns.station_name("Baz Solar 2") == "Baz Solar"
+    assert ns.station_name("Plain Name") == "Plain Name"
+    assert ns.limit_label("Islanding - Unit") == "islanding risk"
+    assert ns.limit_label("Discretionary") == "discretionary cap"
+    assert ns.limit_label("System Strength") == "system strength"
+
+
+def test_site_name_collapses_stations_and_suffix_is_dominant_unit_specific_limit():
+    s = Scn()
+    # two unit-specific constraints on the same units; the Islanding one binds more often
+    s.constraint("N_ISL", limittype="Islanding - Unit", descr="x", terms={"CP_U1": 1.0, "CP_U2": 1.0})
+    s.constraint("N_SS", limittype="System Strength", descr="x", terms={"CP_U1": 1.0, "CP_U2": 1.0})
+    s.unit("U1", site="Kennedy Energy Park - Phase 1 - Solar")
+    s.unit("U2", site="Kennedy Energy Park - Phase 1 - Wind")
+    for i in range(3):
+        s.bind("N_ISL", T0 + i * M)
+    s.bind("N_SS", T0)
+    s.build()
+    assert s.q("select name, name_source from area") == [("Kennedy Energy Park \u2014 islanding risk", "site")]
+
+
+def test_interconnectors_column():
+    s = Scn()
+    s.constraint("N_IC", descr="Out= Nil, interconnector only limit")
+    s.ins("cn.spd_interconnector", genconid="N_IC", effectivedate=V1, versionno=1, interconnectorid="V-SA", factor=1.0)
+    s.ins("cn.spd_interconnector", genconid="N_IC", effectivedate=V1, versionno=1, interconnectorid="VIC1-NSW1", factor=-1.0)
+    s.ins("cn.spd_interconnector", genconid="N_IC", effectivedate=V1, versionno=1, interconnectorid="T-V-MNSP1", factor=0.0)
+    s.constraint("N_U", terms={"CP_U": 1.0})
+    s.unit("U")
+    s.bind("N_IC", T0)
+    s.bind("N_U", T0)
+    s.build()
+    got = dict(s.q("select area_id, interconnectors from area"))
+    assert got == {"N_IC": "V-SA,VIC1-NSW1", "N_U": ""}

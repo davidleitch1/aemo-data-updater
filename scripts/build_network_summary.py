@@ -24,6 +24,7 @@ def main(argv=None) -> int:
     ap.add_argument("--constraints", default=str(DATA / "constraints_readonly.duckdb"))
     ap.add_argument("--aemo", default=str(DATA / "aemo_readonly.duckdb"))
     ap.add_argument("--out", default=str(DATA / "network_summary.duckdb"))
+    ap.add_argument("--area-names", default=str(Path(__file__).resolve().parent.parent / "config/network_area_names.csv"))
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--memory-limit", default="12GB")
     a = ap.parse_args(argv)
@@ -36,12 +37,16 @@ def main(argv=None) -> int:
         con.execute(f"SET temp_directory = '{spill}'")
         con.execute(f"ATTACH '{a.constraints}' AS cn (READ_ONLY)")
         con.execute(f"ATTACH '{a.aemo}' AS am (READ_ONLY)")
-        counts = ns.run(con, a.out)
+        counts = ns.run(con, a.out, area_names=a.area_names)
+        stale = ns.stale_overrides(con)
+        src = dict(con.execute('select name_source, count(*) from area group by 1 order by 2 desc').fetchall())
     finally:
         con.close()
         shutil.rmtree(spill, ignore_errors=True)
     for t, n in counts.items():
         print(f"{t:26s} {n:>12,d}")
+    print('area name sources:', src)
+    print('override area_ids not found in this build:', stale if stale else 'none')
     size = Path(a.out).stat().st_size
     print(f"wrote {a.out} ({size / 1e6:,.1f} MB) in {time.time() - t0:.1f}s")
     return 0
