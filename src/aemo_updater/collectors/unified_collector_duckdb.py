@@ -29,6 +29,7 @@ import duckdb
 import pandas as pd
 
 from .unified_collector import UnifiedAEMOCollector, classify_duid_fuel
+from ..replica import refresh_replica
 from ..alerts import build_default_dispatcher
 
 logger = logging.getLogger(__name__)
@@ -565,18 +566,17 @@ class DuckDBCollector(UnifiedAEMOCollector):
     def _copy_to_readonly(self):
         """Copy the DuckDB file to a read-only replica for dashboard access.
 
-        Uses atomic rename (shutil.copy2 to .tmp, then os.rename) so readers
-        never see a partially-written file. ~1s for 1.2 GB on local APFS.
+        Uses replica.refresh_replica (APFS clone to .tmp, then atomic rename) so readers
+        never see a partially-written file; falls back to a byte copy if cloning fails.
         """
         readonly_path = self.db_path.parent / 'aemo_readonly.duckdb'
         tmp_path = self.db_path.parent / 'aemo_readonly.duckdb.tmp'
 
         try:
             start = time.time()
-            shutil.copy2(str(self.db_path), str(tmp_path))
-            os.rename(str(tmp_path), str(readonly_path))
+            method = refresh_replica(self.db_path, readonly_path)
             elapsed = time.time() - start
-            logger.info(f'Copied DB to read-only replica in {elapsed:.1f}s')
+            logger.info(f'Copied DB to read-only replica in {elapsed:.1f}s ({method})')
         except Exception as e:
             logger.error(f'Failed to copy read-only replica: {e}')
             # Clean up partial copy
@@ -626,9 +626,8 @@ class DuckDBCollector(UnifiedAEMOCollector):
         tmp_path = self.bids_db_path.parent / 'bids_readonly.duckdb.tmp'
         try:
             start = time.time()
-            shutil.copy2(str(self.bids_db_path), str(tmp_path))
-            os.rename(str(tmp_path), str(readonly_path))
-            logger.info(f'Copied bids DB to read-only replica in {time.time() - start:.1f}s')
+            method = refresh_replica(self.bids_db_path, readonly_path)
+            logger.info(f'Copied bids DB to read-only replica in {time.time() - start:.1f}s ({method})')
         except Exception as e:
             logger.error(f'Failed to copy bids read-only replica: {e}')
             if tmp_path.exists():
@@ -708,9 +707,8 @@ class DuckDBCollector(UnifiedAEMOCollector):
         tmp_path = self.constraints_db_path.parent / 'constraints_readonly.duckdb.tmp'
         try:
             start = time.time()
-            shutil.copy2(str(self.constraints_db_path), str(tmp_path))
-            os.rename(str(tmp_path), str(readonly_path))
-            logger.info(f'Copied constraints DB to read-only replica in {time.time() - start:.1f}s')
+            method = refresh_replica(self.constraints_db_path, readonly_path)
+            logger.info(f'Copied constraints DB to read-only replica in {time.time() - start:.1f}s ({method})')
         except Exception as e:
             logger.error(f'Failed to copy constraints read-only replica: {e}')
             if tmp_path.exists():

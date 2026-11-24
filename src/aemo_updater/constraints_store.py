@@ -331,16 +331,11 @@ def connect_with_retry(path, attempts: int = 5, base_delay: float = 2.0, sleep=t
 
 
 def refresh_readonly(db_path) -> Path:
-    """Copy ``db_path`` to constraints_readonly.duckdb beside it, atomically (copy, then rename)."""
-    import shutil
+    """Refresh constraints_readonly.duckdb beside ``db_path``, atomically (APFS clone, then rename)."""
+    from .replica import refresh_replica
     db_path = Path(db_path)
-    dst, tmp = db_path.parent / "constraints_readonly.duckdb", db_path.parent / "constraints_readonly.duckdb.tmp"
-    try:
-        shutil.copy2(str(db_path), str(tmp))
-        os.rename(str(tmp), str(dst))
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+    dst = db_path.parent / "constraints_readonly.duckdb"
+    refresh_replica(db_path, dst)
     return dst
 
 

@@ -67,8 +67,9 @@ def test_cleanup_on_failure():
     collector = DuckDBCollector()
     tmp_path = DB_PATH.parent / 'aemo_readonly.duckdb.tmp'
 
-    # Mock shutil.copy2 to raise an error
-    with mock.patch('shutil.copy2', side_effect=OSError("Simulated disk error")):
+    # Make the replica refresh fail (it clones, falling back to shutil.copy2)
+    with mock.patch('aemo_updater.collectors.unified_collector_duckdb.refresh_replica',
+                    side_effect=OSError("Simulated disk error")):
         collector._copy_to_readonly()
 
     assert not tmp_path.exists(), f"Temporary file not cleaned up: {tmp_path}"
