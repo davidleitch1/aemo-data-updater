@@ -197,6 +197,7 @@ class UnifiedAEMOCollector:
             'bdu5': set(),
             'bids': set(),
             'bid_dispatch': set(),
+            'constraints5': set(),
         }
         
         # Collect all data types every cycle (no frequency limiting)

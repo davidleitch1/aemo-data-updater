@@ -68,6 +68,15 @@ class DuckDBCollector(UnifiedAEMOCollector):
         self.bids_db_path = Path(bids_db_path)
         logger.info(f"Bids DuckDB database: {self.bids_db_path}")
 
+        # Network-constraint data likewise lives in its own file (constraints.duckdb).
+        constraints_db_path = self.config.get(
+            'constraints_duckdb_path',
+            os.getenv('AEMO_CONSTRAINTS_DUCKDB_PATH', str(self.data_path / 'constraints.duckdb'))
+        )
+        self.constraints_db_path = Path(constraints_db_path)
+        self._constraints_attempts = {}   # filename -> failed store attempts
+        logger.info(f"Constraints DuckDB database: {self.constraints_db_path}")
+
         # Verify tables exist (temporary connection)
         self._open_conn()
         tables = {t[0] for t in self.conn.execute("SHOW TABLES").fetchall()}
@@ -499,6 +508,13 @@ class DuckDBCollector(UnifiedAEMOCollector):
             logger.error(f"Error collecting bids: {e}")
             results['bids'] = False
 
+        # Network constraints -> separate constraints.duckdb (DispatchIS CONSTRAINT / LOCAL_PRICE)
+        try:
+            results['constraints'] = self.collect_and_store_constraints()
+        except Exception as e:
+            logger.error(f"Error collecting constraints: {e}")
+            results['constraints'] = False
+
         # Summary
         duration = (datetime.now() - start_time).total_seconds()
         success_count = sum(results.values())
@@ -615,6 +631,88 @@ class DuckDBCollector(UnifiedAEMOCollector):
             logger.info(f'Copied bids DB to read-only replica in {time.time() - start:.1f}s')
         except Exception as e:
             logger.error(f'Failed to copy bids read-only replica: {e}')
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    MAX_CONSTRAINT_ATTEMPTS = 5
+
+    def collect_and_store_constraints(self) -> bool:
+        """Store the binding constraints and local prices of each new DispatchIS file in
+        constraints.duckdb, then refresh its readonly replica. Returns True if any file was
+        stored this cycle.
+
+        File bytes come through _fetch_csv_bytes, so files already fetched this cycle for
+        prices5 are served from the cache. A file that fails to store, or all unprocessed
+        files if the database cannot be opened, is removed from the 'constraints5' seen-set so
+        the next cycle retries it (up to MAX_CONSTRAINT_ATTEMPTS per file; after that
+        scripts/constraints_repair.py is the route).
+        """
+        from .. import constraints_store as cstore
+
+        url = self.current_urls['prices5']
+        files = self.get_latest_files(url, 'PUBLIC_DISPATCHIS_')
+        batch = self._select_new_files('constraints5', files)
+        if not batch:
+            return False
+
+        seen = self.last_files['constraints5']
+
+        def retry_later(filename):
+            n = self._constraints_attempts.get(filename, 0) + 1
+            self._constraints_attempts[filename] = n
+            if n < self.MAX_CONSTRAINT_ATTEMPTS:
+                seen.discard(filename)
+            else:
+                logger.error(f"constraints: giving up on {filename} after {n} attempts")
+
+        try:
+            conn = cstore.connect_with_retry(self.constraints_db_path, log=logger.warning)
+        except Exception as e:
+            logger.error(f"constraints: cannot open {self.constraints_db_path}: {e}")
+            for filename in batch:
+                retry_later(filename)
+            return False
+
+        stored = 0
+        try:
+            cstore.ensure_tables(conn)
+            for filename in batch:
+                try:
+                    content = self._fetch_csv_bytes(url, filename)
+                    if content is None:
+                        raise ValueError("no CSV in zip")
+                    res = cstore.store_dispatchis(conn, content)
+                    stored += 1
+                    logger.debug(f"constraints: {filename} {res}")
+                except Exception as e:
+                    logger.error(f"constraints: failed to store {filename}: {e}")
+                    retry_later(filename)
+        except Exception as e:
+            logger.error(f"constraints: store error: {e}")
+            for filename in batch:
+                retry_later(filename)
+        finally:
+            conn.close()
+
+        if stored:
+            logger.info(f"DuckDB: stored constraints for {stored} DispatchIS files")
+            self._copy_constraints_to_readonly()
+        return stored > 0
+
+    def _copy_constraints_to_readonly(self):
+        """Atomically refresh constraints_readonly.duckdb for readers."""
+        readonly_path = self.constraints_db_path.parent / 'constraints_readonly.duckdb'
+        tmp_path = self.constraints_db_path.parent / 'constraints_readonly.duckdb.tmp'
+        try:
+            start = time.time()
+            shutil.copy2(str(self.constraints_db_path), str(tmp_path))
+            os.rename(str(tmp_path), str(readonly_path))
+            logger.info(f'Copied constraints DB to read-only replica in {time.time() - start:.1f}s')
+        except Exception as e:
+            logger.error(f'Failed to copy constraints read-only replica: {e}')
             if tmp_path.exists():
                 try:
                     tmp_path.unlink()
