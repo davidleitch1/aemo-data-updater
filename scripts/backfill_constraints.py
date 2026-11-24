@@ -27,6 +27,16 @@ collector also wrote, so each is logged as "inserted N, already present M": inse
 live collection missed those rows and the archive supplied them.
 
     .venv/bin/python scripts/backfill_constraints.py --auto [--pause 20] [--db PATH]
+
+--fill-rhs (also run at the end of --auto): GENERICCONSTRAINTRHS holds the right-hand-side terms of
+each constraint equation. It is filtered at load (scope 'DS', constraints that appear in
+constraint_binding5; see constraints_store.RHS_FILTER_NOTE), so the table is topped up from the
+data instead of the _loaded ledger: every (constraint, effectivedate, versionno) in
+constraint_binding5 with no rows in generic_constraint_rhs is grouped by effective month, and
+that month's file is fetched and inserted (anti-join). Months before 2015 are skipped and months
+not yet in the archive are logged. EMSMASTER (a snapshot) is replaced from the newest archive month.
+
+    .venv/bin/python scripts/backfill_constraints.py --fill-rhs [--pause 20] [--db PATH]
 """
 from __future__ import annotations
 
@@ -177,6 +187,86 @@ def pick_auto_end(listing, today):
     return None
 
 
+def fetch_csvs(parts, tmp: Path, download, sleep, pause: float):
+    """Download and extract the part zips of one table-month; returns [(part, csv_path)]."""
+    csvs = []
+    for part, href in parts:
+        zp = tmp / f"part{part}.zip"
+        download(urllib.parse.urljoin(HOST, href), str(zp))
+        big = zp.stat().st_size > LARGE_BYTES
+        sleep(pause if big else 1.0)
+        csv = tmp / f"data{part}.csv"
+        _extract(zp, csv)
+        zp.unlink()
+        csvs.append((part, csv))
+    return csvs
+
+
+def missing_rhs_months(con) -> list[tuple[str, int]]:
+    """[(ym, n_versions)] newest first: binding versions with no generic_constraint_rhs rows."""
+    rows = con.execute("""
+        SELECT strftime(date_trunc('month', v.eff), '%Y-%m') AS ym, count(*) AS n
+        FROM (SELECT DISTINCT constraintid, genconid_effectivedate AS eff, genconid_versionno AS ver
+              FROM constraint_binding5 WHERE genconid_effectivedate IS NOT NULL) v
+        WHERE NOT EXISTS (SELECT 1 FROM generic_constraint_rhs r WHERE r.genconid = v.constraintid
+                          AND r.effectivedate = v.eff AND r.versionno = v.ver)
+        GROUP BY 1 ORDER BY 1 DESC""").fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def fill_rhs(con, db: Path, *, listing, download, sleep, log, pause, today) -> dict:
+    """Top up generic_constraint_rhs for binding versions that lack rows, then refresh emsmaster."""
+    res = {"months": [], "inserted": 0, "skipped_old": [], "unavailable": [], "residual_versions": 0,
+           "emsmaster": None}
+    for ym, n in missing_rhs_months(con):
+        if int(ym[:4]) < 2015:
+            res["skipped_old"].append(ym)
+            log(f"rhs {ym}: {n} version(s) skipped (before 2015)")
+            continue
+        try:
+            hrefs = listing(ym)
+        except Unavailable:
+            res["unavailable"].append(ym)
+            log(f"rhs {ym}: {n} version(s) not yet in the archive")
+            continue
+        parts = match(hrefs, "GENERICCONSTRAINTRHS")
+        if not parts:
+            log(f"rhs {ym}: GENERICCONSTRAINTRHS NOT FOUND")
+            continue
+        tmp = Path(tempfile.mkdtemp(prefix="rhs_", dir=str(db.parent)))
+        try:
+            csvs = fetch_csvs(parts, tmp, download, sleep, pause)
+            r = store.load_month_table(con, "GENERICCONSTRAINTRHS", ym, csvs, record=False)
+            ins = sum(i for _, i, _ in r)
+            res["months"].append(ym)
+            res["inserted"] += ins
+            log(f"rhs {ym}: {n} version(s) lacked rows; {_fmt(r)}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    res["residual_versions"] = sum(n for _, n in missing_rhs_months(con))
+    for y, m in previous_months(today):
+        ym = f"{y}-{m:02d}"
+        try:
+            hrefs = listing(ym)
+        except Unavailable:
+            continue
+        parts = match(hrefs, "EMSMASTER")
+        if not parts:
+            continue
+        tmp = Path(tempfile.mkdtemp(prefix="ems_", dir=str(db.parent)))
+        try:
+            csvs = fetch_csvs(parts, tmp, download, sleep, pause)
+            r = store.load_month_table(con, "EMSMASTER", ym, csvs, record=False)
+            res["emsmaster"] = ym
+            log(f"rhs {ym}: EMSMASTER {_fmt(r)}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        break
+    log(f"rhs fill: {len(res['months'])} month(s) fetched, {res['inserted']} row(s) inserted, "
+        f"{res['residual_versions']} version(s) still without rows")
+    return res
+
+
 def _fmt(results) -> str:
     return "; ".join(f"{t} inserted {i}, already present {p}" for t, i, p in results)
 
@@ -205,6 +295,8 @@ def main(argv=None, *, listing=curl_listing, download=curl_download, sleep=time.
     ap.add_argument("--pause", type=float, default=20.0, help="seconds to sleep after a download over 5 MB")
     ap.add_argument("--db", type=Path, default=None)
     ap.add_argument("--dry-run", action="store_true", help="list what would be fetched")
+    ap.add_argument("--fill-rhs", action="store_true",
+                    help="top up generic_constraint_rhs for binding versions that lack rows; refresh emsmaster")
     args = ap.parse_args(argv)
     if args.auto:
         if args.start or args.end or args.defs_from:
@@ -223,15 +315,16 @@ def main(argv=None, *, listing=curl_listing, download=curl_download, sleep=time.
             log("auto: no MMSDM directory for the last two months")
             return 1
         args.start, args.defs_from, args.snapshots = args.end, shift_month(args.end, 2), True
+        args.fill_rhs = True
         log(f"auto: end month {args.end[0]}-{args.end[1]:02d}, definitions from "
             f"{args.defs_from[0]}-{args.defs_from[1]:02d}")
-    elif args.end is None:
+    elif args.end is None and not args.fill_rhs:
         ap.error("--end is required (or use --auto)")
-    if not (args.start or args.defs_from or args.snapshots):
+    if not (args.start or args.defs_from or args.snapshots or args.fill_rhs):
         ap.error("nothing to do: give --start, --defs-from and/or --snapshots")
-    if args.start and args.start > args.end:
+    if args.start and args.end and args.start > args.end:
         ap.error("--start is after --end")
-    if args.defs_from and args.defs_from > args.end:
+    if args.defs_from and args.end and args.defs_from > args.end:
         ap.error("--defs-from is after --end")
     if args.tables:
         bad = [t for t in args.tables.upper().split(",") if t not in store.SOURCE_TABLES]
@@ -303,6 +396,14 @@ def main(argv=None, *, listing=curl_listing, download=curl_download, sleep=time.
                     log(f"{ym} {t}: FAILED: {e}")
                 finally:
                     shutil.rmtree(tmp, ignore_errors=True)
+        if (args.fill_rhs or args.auto) and con is not None and not args.dry_run:
+            try:
+                from datetime import date as _date
+                fill_rhs(con, db, listing=listing, download=download, sleep=sleep, log=log,
+                         pause=args.pause, today=today or _date.today())
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                log(f"rhs fill: FAILED: {e}")
     finally:
         if con is not None:
             con.close()

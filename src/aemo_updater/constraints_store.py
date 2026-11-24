@@ -87,6 +87,16 @@ TABLES: Dict[str, Spec] = {
     "network_outageconstraintset": Spec(dict(
         outageid="int", genconsetid="str", startinterval="ts", endinterval="ts"),
         ["outageid", "genconsetid", "startinterval"]),
+    # Right-hand-side terms of the dispatch-scope constraint equation. FILTERED at load (see
+    # RHS_FILTER_NOTE): only scope 'DS' and only constraints that appear in constraint_binding5.
+    "generic_constraint_rhs": Spec(dict(
+        genconid="str", effectivedate="ts", versionno="int", scope="str", termid="int", groupid="int",
+        spd_id="str", spd_type="str", factor="dbl", operation="str", defaultvalue="dbl",
+        parameterterm1="str", parameterterm2="str", parameterterm3="str", lastchanged="ts"),
+        ["genconid", "effectivedate", "versionno", "scope", "termid"]),
+    # English description of every term id (snapshot, replaced whole like dudetailsummary)
+    "emsmaster": Spec(dict(spd_id="str", spd_type="str", description="str", grouping_id="str",
+                           lastchanged="ts"), ["spd_id"]),
     "dudetailsummary": Spec(dict(
         duid="str", start_date="ts", end_date="ts", dispatchtype="str", connectionpointid="str",
         regionid="str", stationid="str"), ["duid", "start_date"]),
@@ -105,7 +115,16 @@ SOURCE_TABLES: Dict[str, str] = {
     "NETWORK_OUTAGEDETAIL": "network_outagedetail",
     "NETWORK_OUTAGECONSTRAINTSET": "network_outageconstraintset",
     "DUDETAILSUMMARY": "dudetailsummary",
+    "GENERICCONSTRAINTRHS": "generic_constraint_rhs",
+    "EMSMASTER": "emsmaster",
 }
+
+RHS_FILTER_NOTE = (
+    "GENERICCONSTRAINTRHS is about 400,000 rows a month and the database is copied whole every "
+    "collector cycle, so it is loaded FILTERED: only scope 'DS' rows whose genconid appears in "
+    "constraint_binding5 (any time) are kept. Because that set grows, backfill_constraints.py "
+    "--fill-rhs finds binding versions without rhs rows and fetches their effective months; it "
+    "does not use _loaded for this table.")
 
 # the key of genconsetinvoke when a file predates invocation_id
 INVOKE_FALLBACK_KEY = ["genconsetid", "startdate", "startperiod"]
@@ -236,6 +255,7 @@ def insert_new(con, target: str, stg: str = "_stg", key: Optional[Sequence[str]]
 # whose values present in the incoming data scope which stored rows are replaced.
 SNAPSHOT_SCOPE: Dict[str, Optional[str]] = {
     "dudetailsummary": None,
+    "emsmaster": None,
     "network_outagedetail": "outageid",
     "network_outageconstraintset": "outageid",
 }
@@ -397,7 +417,7 @@ def store_dispatchis(con, csv_bytes: bytes) -> dict:
 # ---------------------------------------------------------------- month loader
 
 def load_month_table(con, source_table: str, ym: str,
-                     parts: Sequence[Tuple[int, Path]]) -> List[Tuple[str, int, int]]:
+                     parts: Sequence[Tuple[int, Path]], record: bool = True) -> List[Tuple[str, int, int]]:
     """Load every part file (extracted AEMO CSVs) of one MMSDM table-month in one transaction,
     record it in _loaded, and return [(target_table, inserted, already_present), ...].
     DISPATCHCONSTRAINT also fills constraint_intervals from all intervention=0 rows."""
@@ -427,6 +447,10 @@ def load_month_table(con, source_table: str, ym: str,
             con.execute("DROP TABLE IF EXISTS _bind")
         else:
             _stage(con, target, src_cols)
+            if target == "generic_constraint_rhs":
+                # see RHS_FILTER_NOTE
+                con.execute("DELETE FROM _stg WHERE scope IS DISTINCT FROM 'DS' OR genconid IS NULL OR genconid NOT IN "
+                            "(SELECT DISTINCT constraintid FROM constraint_binding5)")
             key = None
             if target == "genconsetinvoke" and "invocation_id" not in src_cols:
                 key = INVOKE_FALLBACK_KEY
@@ -435,7 +459,7 @@ def load_month_table(con, source_table: str, ym: str,
             else:
                 i, p = insert_new(con, target, "_stg", key)
             results.append((target, i, p))
-        for part, n in part_counts:
+        for part, n in (part_counts if record else []):
             con.execute("INSERT INTO _loaded VALUES (?, ?, ?, ?, now())", [source_table, ym, int(part), int(n)])
         con.execute("DROP TABLE IF EXISTS _raw")
         con.execute("DROP TABLE IF EXISTS _stg")
