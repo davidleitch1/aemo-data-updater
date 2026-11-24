@@ -25,6 +25,9 @@ def main(argv=None) -> int:
     ap.add_argument("--aemo", default=str(DATA / "aemo_readonly.duckdb"))
     ap.add_argument("--out", default=str(DATA / "network_summary.duckdb"))
     ap.add_argument("--area-names", default=str(Path(__file__).resolve().parent.parent / "config/network_area_names.csv"))
+    ap.add_argument("--registry", default=str(DATA / "network_area_registry.json"),
+                    help="area registry (constraint -> area_id); created on the first run, then kept stable")
+    ap.add_argument("--notes", default=str(Path(__file__).resolve().parent.parent / "config/network_area_notes.json"))
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--memory-limit", default="12GB")
     a = ap.parse_args(argv)
@@ -37,7 +40,7 @@ def main(argv=None) -> int:
         con.execute(f"SET temp_directory = '{spill}'")
         con.execute(f"ATTACH '{a.constraints}' AS cn (READ_ONLY)")
         con.execute(f"ATTACH '{a.aemo}' AS am (READ_ONLY)")
-        counts = ns.run(con, a.out, area_names=a.area_names)
+        counts = ns.run(con, a.out, area_names=a.area_names, registry=a.registry, notes=a.notes)
         stale = ns.stale_overrides(con)
         src = dict(con.execute('select name_source, count(*) from area group by 1 order by 2 desc').fetchall())
     finally:

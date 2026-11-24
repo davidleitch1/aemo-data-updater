@@ -60,10 +60,10 @@ class Scn:
             self.ins("am.duid_mapping", region=region, **{"site name": site or "Site " + duid}, owner="o", duid=duid,
                      capacity_mw=cap, storage_mwh=0.0, fuel=fuel)
 
-    def bind(self, cid, t, mv=100.0, eff=V1, ver=1, interv=0):
+    def bind(self, cid, t, mv=100.0, eff=V1, ver=1, interv=0, rhs=None, lhs=None):
         self.times.add(t)
         self.ins("cn.constraint_binding5", settlementdate=t, constraintid=cid, intervention=interv,
-                 marginalvalue=mv, genconid_effectivedate=eff, genconid_versionno=ver)
+                 marginalvalue=mv, genconid_effectivedate=eff, genconid_versionno=ver, rhs=rhs, lhs=lhs)
 
     def build(self):
         for t in self.times:
@@ -173,8 +173,14 @@ def test_connection_point_mapping_is_date_ranged():
 # ------------------------------------------------------------------ cause
 
 @pytest.mark.parametrize("cid,descr,lt,expected", [
-    ("N_SS", "Out= Foo", "System Strength", "Unit-specific limit"),
-    ("N_D", "x", "Discretionary", "Unit-specific limit"),
+    ("N_SS", "Out= Foo", "System Strength", "Plant stability limit"),
+    ("N_ISL", "x", "Islanding - Unit", "Plant stability limit"),
+    ("N_D", "x", "Discretionary", "Other plant cap"),
+    ("N_UZ", "x", "Unit Zero", "Other plant cap"),
+    ("N_NC", "x", "Non-Conformance", "Other plant cap"),
+    ("C_V_LANC_ZERO", "x", "Unit Zero", "Commissioning"),            # C_ prefix wins over the limit type
+    ("N_COM", "Out= Nil, Foo Solar Farm COMMISSIONING limit", "System Strength", "Commissioning"),
+    ("N_COM2", "commissioning test", "Thermal", "Commissioning"),
     ("N_N1", "Out= Nil, avoid O/L X", "Thermal", "System normal"),
     ("N_N2", "Out=nil", "Thermal", "System normal"),
     ("N_N3", "NIL outage constraint on Y", "Thermal", "System normal"),
@@ -196,7 +202,7 @@ def test_cause_in_constraint_meta_and_regions():
         s.bind(c, T0)
     s.build()
     m = {r[0]: r[1:] for r in s.q("select constraintid, cause, region, element from constraint_meta")}
-    assert m["Q_SS"][:2] == ("Unit-specific limit", "QLD")
+    assert m["Q_SS"][:2] == ("Plant stability limit", "QLD")
     assert m["V_NIL"][:2] == ("System normal", "VIC")
     assert m["V_NIL"][2] == "Foo - Bar"
     assert m["T_OUT"][:2] == ("Outage", "TAS")
@@ -348,7 +354,6 @@ def test_area_n_intervals_is_distinct_when_two_constraints_bind_together():
     s.build()
     assert len(s.q("select distinct area_id from constraint_meta")) == 1
     r = s.q("select n_intervals, n_sysnormal, n_outage, n_unit_specific from area_daily")
-    assert r == [(2, 1, 1, 1)] or r == [(2, 2, 1, 1)]
     assert r == [(2, 2, 1, 1)]          # N_A in both intervals (system normal), N_B and N_S in the first
     # cause_daily counts constraint-intervals: 4 in total
     assert s.q("select sum(n_constraint_intervals) from cause_daily")[0][0] == 4
@@ -603,3 +608,54 @@ def test_interconnectors_column():
     s.build()
     got = dict(s.q("select area_id, interconnectors from area"))
     assert got == {"N_IC": "V-SA,VIC1-NSW1", "N_U": ""}
+
+
+# ------------------------------------------------------------------ five causes
+
+def test_area_daily_splits_plant_causes_and_keeps_n_unit_specific():
+    s = Scn()
+    terms = {"CP_U1": 0.5, "CP_U2": 0.5}
+    s.constraint("N_A", terms=terms, descr="Out= Nil")                                   # system normal
+    s.constraint("N_SS", terms=terms, descr="x", limittype="System Strength")           # plant stability
+    s.constraint("N_ISL", terms=terms, descr="x", limittype="Islanding - Unit")         # plant stability
+    s.constraint("N_DC", terms=terms, descr="x", limittype="Discretionary")             # other cap
+    s.constraint("C_N_COM", terms=terms, descr="x", limittype="Unit Zero")              # commissioning
+    s.unit("U1")
+    s.unit("U2")
+    s.bind("N_A", T0)
+    s.bind("N_SS", T0)
+    s.bind("N_ISL", T0)                       # same interval as N_SS: counts once for plant stability
+    s.bind("N_DC", T0 + M)
+    s.bind("C_N_COM", T0 + M)
+    s.bind("C_N_COM", T0 + 2 * M)
+    s.build()
+    assert len(s.q("select distinct area_id from constraint_meta")) == 1
+    r = s.q("select n_intervals, n_sysnormal, n_plant_stability, n_commissioning, n_other_cap, n_unit_specific "
+            "from area_daily")
+    assert r == [(3, 1, 1, 2, 1, 3)]          # unit-specific = distinct intervals with any of the three
+    assert {x[0]: x[1] for x in s.q("select cause, sum(n_constraint_intervals) from cause_daily group by 1")} == {
+        "System normal": 1, "Plant stability limit": 2, "Commissioning": 2, "Other plant cap": 1}
+
+
+def test_site_name_suffix_commissioning_for_commissioning_majority_area():
+    s = Scn()
+    s.constraint("C_V_LANC_ZERO", limittype="Unit Zero", descr="x", terms={"CP_U1": 1.0})
+    s.constraint("N_SS", limittype="System Strength", descr="x", terms={"CP_U1": 1.0})
+    s.unit("U1", site="Lancaster Solar Farm")
+    for i in range(3):
+        s.bind("C_V_LANC_ZERO", T0 + i * M)
+    s.bind("N_SS", T0)
+    s.build()
+    assert s.q("select name, name_source from area") == [("Lancaster Solar Farm — commissioning", "site")]
+
+
+def test_site_name_uses_plant_limit_when_commissioning_is_a_minority():
+    s = Scn()
+    s.constraint("C_V_X_ZERO", limittype="Unit Zero", descr="x", terms={"CP_U1": 1.0})
+    s.constraint("N_SS", limittype="System Strength", descr="x", terms={"CP_U1": 1.0})
+    s.unit("U1", site="Foo Wind Farm")
+    s.bind("C_V_X_ZERO", T0)
+    for i in range(3):
+        s.bind("N_SS", T0 + i * M)
+    s.build()
+    assert s.q("select name from area") == [("Foo Wind Farm — system strength",)]
