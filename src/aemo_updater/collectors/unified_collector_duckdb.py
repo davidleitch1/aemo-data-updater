@@ -30,6 +30,7 @@ import pandas as pd
 
 from .unified_collector import UnifiedAEMOCollector, classify_duid_fuel
 from ..replica import refresh_replica
+from .. import bid_file_state
 from ..alerts import build_default_dispatcher
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,15 @@ class DuckDBCollector(UnifiedAEMOCollector):
         )
         self.bids_db_path = Path(bids_db_path)
         logger.info(f"Bids DuckDB database: {self.bids_db_path}")
+
+        # Which daily bid files have been merged, kept across restarts (bid_file_state.py);
+        # without it a restart re-processes every daily file on CURRENT for ~7 hours.
+        self.bid_file_state_path = Path(self.config.get(
+            'bid_file_state_path', str(self.bids_db_path.parent / 'bid_file_state.json')))
+        for key, names in bid_file_state.load(self.bid_file_state_path).items():
+            self.last_files[key].update(names)
+        logger.info(f"Bid file state: {len(self.last_files['bids'])} bid, "
+                    f"{len(self.last_files['bid_dispatch'])} dispatch files already merged")
 
         # Network-constraint data likewise lives in its own file (constraints.duckdb).
         constraints_db_path = self.config.get(
@@ -616,6 +626,12 @@ class DuckDBCollector(UnifiedAEMOCollector):
                 logger.info(f"DuckDB: merged bid_dispatch {n} rows")
         finally:
             bids_conn.close()
+
+        # Only after a successful merge: a failed merge is retried after a restart.
+        try:
+            bid_file_state.save(self.bid_file_state_path, self.last_files)
+        except Exception as e:
+            logger.warning(f"Could not save bid file state: {e}")
 
         self._copy_bids_to_readonly()
         return True
